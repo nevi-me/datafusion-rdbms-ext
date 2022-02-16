@@ -1,0 +1,18 @@
+[package]
+name = "datafusion-rdbms-ext"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+datafusion = { path = "../arrow-datafusion/datafusion" }
+async-trait = "0.1"
+futures-util = "0.3"
+# TODO: create separate features for sources, link them to DB dialects
+tokio-postgres = "0.7"
+tokio = { version = "1", features = ["macros"] }
+tokio-stream = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros"] }
