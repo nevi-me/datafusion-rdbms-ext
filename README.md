@@ -44,4 +44,4 @@ A heavily optimised OLAP database can often perform joins + aggregates with a lo
 
 I personally see DF (more Ballista) as very fitting in a federated query engine space. I would want to replace Dremio, SAP HANA, Presto, etc with it. For DF/Ballista to reach a position where one can replace these engines with it, it'd need a lot of data source connectivity. Not only for pulling data, but also for efficiently choosing when to push compute to source vs loading data.
 
-For example, I've previously worked on a draft of a MongoDB DataFusion source, which worked reasonably, and with effort and tuning could grant the user a neat SQL interface into MondoDB data.
+For example, I've previously worked on a draft of a MongoDB DataFusion source, which worked reasonably, and with effort and tuning could grant the user a neat SQL interface into MongoDB data.
