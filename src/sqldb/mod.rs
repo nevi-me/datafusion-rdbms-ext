@@ -32,12 +32,16 @@ impl ConnectionParameters {
 pub struct DatabaseConnector {
     db_type: DatabaseType,
     params: ConnectionParameters,
+    db_name: String,
 }
 
 impl DatabaseConnector {
     pub fn into_connection(&self) -> Arc<impl DatabaseConnection> {
         match self.db_type {
-            DatabaseType::Postgres => Arc::new(PostgresConnection::new(self.params.clone())),
+            DatabaseType::Postgres => Arc::new(PostgresConnection::new(
+                self.params.clone(),
+                self.db_name.as_str(),
+            )),
             DatabaseType::MySql => todo!(),
             DatabaseType::MsSql => todo!(),
         }

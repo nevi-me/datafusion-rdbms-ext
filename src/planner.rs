@@ -1,3 +1,4 @@
+use datafusion::physical_plan::expressions::PhysicalSortExpr;
 use fmt::Debug;
 use std::task::{Context, Poll};
 use std::{any::Any, fmt, sync::Arc};
@@ -444,6 +445,10 @@ impl ExecutionPlan for DatabaseExec {
                 "Children cannot be replaced in DatabaseExec".to_string(),
             )),
         }
+    }
+
+    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
+        None
     }
 
     /// Execute one partition and return an iterator over RecordBatch
