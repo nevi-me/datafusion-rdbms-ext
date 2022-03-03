@@ -149,7 +149,7 @@ impl TryFrom<PgDataType> for Field {
                 if field.char_max_length == Some(1) {
                     Ok(DataType::UInt8)
                 } else {
-                    Ok(DataType::Binary)
+                    Ok(DataType::Utf8)
                 }
             }
             // "anyarray" | "ARRAY" => Err(()),
@@ -161,7 +161,7 @@ impl TryFrom<PgDataType> for Field {
             // "inet" => Err(()),
             "interval" => Ok(DataType::Interval(IntervalUnit::DayTime)), // TODO: use appropriate unit
             // "name" => Err(()),
-            "numeric" => Ok(DataType::Float64),
+            "numeric" => Ok(DataType::Decimal(32, 8)),
             // "oid" => Err(()),
             "real" => Ok(DataType::Float32),
             "smallint" => Ok(DataType::Int16),

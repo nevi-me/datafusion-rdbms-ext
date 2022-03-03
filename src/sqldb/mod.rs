@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use datafusion::physical_plan::SendableRecordBatchStream;
+use datafusion::{
+    arrow::datatypes::Schema, error::DataFusionError, physical_plan::SendableRecordBatchStream,
+};
 
 use self::postgres::PostgresConnection;
 
@@ -21,7 +23,7 @@ pub struct ConnectionParameters {
 }
 
 impl ConnectionParameters {
-    fn new(connection_string: &str) -> Self {
+    pub fn new(connection_string: &str) -> Self {
         Self {
             connection_string: connection_string.to_string(),
         }
@@ -50,7 +52,15 @@ impl DatabaseConnector {
 
 #[async_trait::async_trait]
 pub trait DatabaseConnection: Clone {
-    async fn fetch_query(&self, query: &str) -> Result<SendableRecordBatchStream, ()>;
-    async fn fetch_table(&self, table_path: &str) -> Result<SendableRecordBatchStream, ()>;
+    async fn fetch_query(
+        &self,
+        query: &str,
+        schema: &Schema,
+    ) -> Result<SendableRecordBatchStream, DataFusionError>;
+    async fn fetch_table(
+        &self,
+        table_path: &str,
+        schema: &Schema,
+    ) -> Result<SendableRecordBatchStream, DataFusionError>;
     fn database_type(&self) -> DatabaseType;
 }

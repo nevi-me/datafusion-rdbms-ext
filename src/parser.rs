@@ -28,7 +28,7 @@ impl LogicalPlanSqlExt for LogicalPlanExt {
 
 /// An inner function that converts a [&LogicalPlan] to a SQL query
 /// TODO: should take dialect as an input
-fn logical_plan_to_sql(plan: &LogicalPlan, dialect: DatabaseDialect) -> DfResult<String> {
+pub fn logical_plan_to_sql(plan: &LogicalPlan, dialect: DatabaseDialect) -> DfResult<String> {
     Ok(match plan {
         LogicalPlan::Projection(_) => todo!(),
         LogicalPlan::Filter(filter) => {
@@ -55,7 +55,8 @@ fn logical_plan_to_sql(plan: &LogicalPlan, dialect: DatabaseDialect) -> DfResult
                 Some(projection) => projection
                     .iter()
                     .map(|index| scan.source.schema().field(*index).name().clone())
-                    .fold(String::new(), |a, b| a + ", " + &b),
+                    .collect::<Vec<_>>()
+                    .join(", "),
             };
             let filter_sql = if scan.filters.is_empty() {
                 String::new()

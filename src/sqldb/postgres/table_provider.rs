@@ -4,17 +4,25 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::datatypes::SchemaRef,
+    arrow::{datatypes::SchemaRef, error::Result as ArrowResult, record_batch::RecordBatch},
     datasource::{
         datasource::TableProviderFilterPushDown as FPD, datasource::TableSource, TableProvider,
         TableType,
     },
-    error::Result as DfResult,
+    error::{DataFusionError, Result as DfResult},
     logical_plan::Expr,
     physical_plan::ExecutionPlan,
 };
+use futures_util::StreamExt;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio_stream::wrappers::ReceiverStream;
 
-use crate::parser::{expr_to_sql, DatabaseDialect};
+use crate::{
+    parser::{expr_to_sql, DatabaseDialect},
+    physical_plan::DatabaseStream,
+};
+
+use crate::sqldb::DatabaseConnection;
 
 use super::PostgresConnection;
 
@@ -42,6 +50,10 @@ impl PostgresTableProvider {
             table_type,
             schema,
         }
+    }
+
+    pub fn connection(&self) -> PostgresConnection {
+        self.connection.clone()
     }
 }
 
@@ -75,14 +87,17 @@ impl TableProvider for PostgresTableProvider {
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         let dialect = DatabaseDialect::Generic;
-        let projection = match projection {
+        let (projection, schema) = match projection {
             Some(projection) => {
                 let schema = &self.schema();
                 let mut iter = projection.iter().map(|index| schema.field(*index).name());
                 let out = iter.next().unwrap().clone();
-                iter.fold(out, |a, b| a + ", " + b)
+                (
+                    iter.fold(out, |a, b| a + ", " + b),
+                    Arc::new(self.schema.project(projection)?),
+                )
             }
-            None => "*".to_string(),
+            None => ("*".to_string(), self.schema()),
         };
         let table = self.table_name.as_str();
         let filter = if !filters.is_empty() {
@@ -104,11 +119,106 @@ impl TableProvider for PostgresTableProvider {
             filter = filter,
             limit = limit
         );
-        panic!("{}", query)
+
+        Ok(Arc::new(PostgresExec {
+            partitions: vec![QueryPartition {
+                connection: self.connection.clone(),
+                query,
+            }],
+            schema,
+        }))
     }
 
     fn supports_filter_pushdown(&self, filter: &Expr) -> DfResult<FPD> {
         Ok(supports_filter_pushdown(filter))
+    }
+}
+
+/// Postgres executor
+#[derive(Debug, Clone)]
+pub struct PostgresExec {
+    partitions: Vec<QueryPartition>,
+    /// Schema after projection is applied
+    schema: SchemaRef,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryPartition {
+    connection: PostgresConnection,
+    query: String,
+}
+
+#[async_trait::async_trait]
+impl ExecutionPlan for PostgresExec {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn output_partitioning(&self) -> datafusion::physical_plan::Partitioning {
+        datafusion::physical_plan::Partitioning::UnknownPartitioning(self.partitions.len())
+    }
+
+    fn output_ordering(
+        &self,
+    ) -> Option<&[datafusion::physical_plan::expressions::PhysicalSortExpr]> {
+        None
+    }
+
+    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
+        // No children as this is a root node
+        vec![]
+    }
+
+    fn with_new_children(
+        &self,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DfResult<Arc<dyn ExecutionPlan>> {
+        if children.is_empty() {
+            Ok(Arc::new(self.clone()))
+        } else {
+            Err(DataFusionError::Internal(format!(
+                "Children cannot be replaced in {:?}",
+                self
+            )))
+        }
+    }
+
+    async fn execute(
+        &self,
+        partition: usize,
+        _runtime: Arc<datafusion::execution::runtime_env::RuntimeEnv>,
+    ) -> DfResult<datafusion::physical_plan::SendableRecordBatchStream> {
+
+        let (response_tx, response_rx): (
+            Sender<ArrowResult<RecordBatch>>,
+            Receiver<ArrowResult<RecordBatch>>,
+        ) = channel(2);
+
+        let partition = self.partitions.get(partition).unwrap().clone();
+
+        let connection = partition.connection.clone();
+        let query = partition.query.clone();
+        let schema = self.schema();
+
+        tokio::task::spawn(async move {
+            let mut response = connection.fetch_query(&query, &schema).await.unwrap();
+            while let Some(value) = response.next().await {
+                response_tx.send(value).await.unwrap();
+            }
+        });
+
+        Ok(Box::pin(DatabaseStream {
+            schema: self.schema(),
+            inner: ReceiverStream::new(response_rx),
+        }))
+    }
+
+    fn statistics(&self) -> datafusion::physical_plan::Statistics {
+        datafusion::physical_plan::Statistics::default()
     }
 }
 
@@ -117,7 +227,7 @@ fn supports_filter_pushdown(filter: &Expr) -> FPD {
     dbg!(filter);
     match filter {
         Expr::Alias(expr, _) => supports_filter_pushdown(expr),
-        Expr::Column(_) => FPD::Unsupported,
+        Expr::Column(_) => FPD::Exact,
         Expr::ScalarVariable(_) => FPD::Unsupported,
         Expr::Literal(_) => FPD::Exact,
         Expr::BinaryExpr { .. } => FPD::Inexact,
@@ -128,7 +238,31 @@ fn supports_filter_pushdown(filter: &Expr) -> FPD {
         Expr::GetIndexedField { .. } => FPD::Unsupported,
         Expr::Between { .. } => FPD::Unsupported,
         Expr::Case { .. } => FPD::Unsupported,
-        Expr::Cast { .. } => FPD::Unsupported,
+        Expr::Cast { expr, data_type } => {
+            // If the expression can be pushed down, then we should be able to cast it
+            let fpd = supports_filter_pushdown(expr);
+            match &fpd {
+                FPD::Unsupported => FPD::Unsupported,
+                FPD::Inexact => FPD::Inexact,
+                FPD::Exact => {
+                    use datafusion::arrow::datatypes::DataType::*;
+                    match data_type {
+                        Boolean | Int8 | Int16 | Int32 | Int64 => fpd,
+                        UInt8 => fpd,
+                        Float32 | Float64 => fpd,
+                        Timestamp(_, _) => fpd,
+                        Date32 => fpd,
+                        Time64(_) => fpd,
+                        Binary => fpd,
+                        LargeBinary => fpd,
+                        Utf8 => fpd,
+                        LargeUtf8 => fpd,
+                        _ => FPD::Unsupported,
+                        // Interval DayTime can be supported too
+                    }
+                }
+            }
+        }
         Expr::TryCast { .. } => FPD::Unsupported,
         Expr::Sort { .. } => FPD::Unsupported,
         Expr::ScalarFunction { .. } => FPD::Unsupported,
