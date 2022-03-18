@@ -3,11 +3,7 @@
 
 use std::sync::Arc;
 
-use datafusion::{
-    error::Result,
-    execution::runtime_env::{RuntimeConfig, RuntimeEnv},
-    physical_plan::common,
-};
+use datafusion::{arrow::util::pretty, error::Result};
 use datafusion_rdbms_ext::{
     make_rdbms_context,
     sqldb::{postgres::PostgresConnection, ConnectionParameters},
@@ -27,35 +23,27 @@ async fn test_simple_join_pushdown() -> Result<()> {
     ctx.register_catalog("bench", Arc::new(catalog));
 
     let query = r#"
-    select c_custkey, c_name, n_name
+    select *
     from bench.public.customer 
     inner join bench.public.nation
     on c_nationkey = n_nationkey
     "#;
 
-    // let query = "select cast(p_retailprice as double precision) from bench.public.part";
-
-    let plan = ctx.sql(query).await.unwrap();
-    let plan = plan.to_logical_plan();
-
-    dbg!(&plan);
-
+    let df = ctx.sql(query).await.unwrap();
+    let plan = df.to_logical_plan();
     let optimized_plan = ctx.optimize(&plan)?;
 
-    dbg!(&optimized_plan);
+    println!("Logical plan:\n\n {:?}", plan);
+    println!("Optimized plan:\n\n {:?}", optimized_plan);
 
-    let physical_plan = ctx.create_physical_plan(&optimized_plan).await.unwrap();
-    let result = physical_plan
-        .execute(
-            1,
-            Arc::new(RuntimeEnv::new(RuntimeConfig::default()).unwrap()),
-        )
-        .await
-        .unwrap();
-
-    let batches = common::collect(result).await.unwrap();
-
-    dbg!(batches);
+    let batches = df.collect().await.unwrap();
+    if !batches.is_empty() {
+        let batch = batches[0].slice(0, batches[0].num_rows().min(10));
+        pretty::print_batches(&[batch]).unwrap();
+    } else {
+        // Print an empty result
+        pretty::print_batches(&batches).unwrap();
+    }
 
     Ok(())
 }
