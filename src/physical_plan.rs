@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use datafusion::arrow::datatypes::Schema;
-use datafusion::execution::context::{ExecutionContextState, QueryPlanner};
+use datafusion::execution::context::{QueryPlanner, SessionState, TaskContext};
 use datafusion::logical_plan::{LogicalPlan, TableScan, UserDefinedLogicalNode};
 use datafusion::physical_plan::planner::{DefaultPhysicalPlanner, ExtensionPlanner};
 use datafusion::{
@@ -15,14 +15,13 @@ use datafusion::{
     },
     error::DataFusionError as DFError,
     error::Result as DFResult,
-    execution::runtime_env::RuntimeEnv,
     physical_plan::{expressions::PhysicalSortExpr, *},
 };
 use futures_util::{Stream, StreamExt};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::node::SqlJoinPlanNode;
+use crate::node::*;
 use crate::sqldb::postgres::table_provider::PostgresTableProvider;
 use crate::sqldb::{DatabaseConnection, DatabaseConnector};
 
@@ -88,15 +87,8 @@ impl ExecutionPlan for DatabaseExec {
     async fn execute(
         &self,
         partition: usize,
-        runtime: Arc<RuntimeEnv>,
+        context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
-        // if partition > 0 {
-        //     return Err(DFError::Internal(format!(
-        //         "DatabaseExec invalid partition {}",
-        //         partition
-        //     )));
-        // }
-
         let (response_tx, response_rx): (
             Sender<ArrowResult<RecordBatch>>,
             Receiver<ArrowResult<RecordBatch>>,
@@ -187,15 +179,15 @@ impl QueryPlanner for SqlDatabaseQueryPlanner {
     async fn create_physical_plan(
         &self,
         logical_plan: &LogicalPlan,
-        ctx_state: &ExecutionContextState,
+        session_state: &SessionState,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        // Teach the default physical planner how to plan TopK nodes.
+        // Teach the default physical planner how to plan RDBMS nodes.
         let physical_planner = DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(
             SqlDatabaseQueryPlanner {},
         )]);
         // Delegate most work of physical planning to the default physical planner
         physical_planner
-            .create_physical_plan(logical_plan, ctx_state)
+            .create_physical_plan(logical_plan, session_state)
             .await
     }
 }
@@ -207,7 +199,7 @@ impl ExtensionPlanner for SqlDatabaseQueryPlanner {
         node: &dyn UserDefinedLogicalNode,
         logical_inputs: &[&LogicalPlan],
         physical_inputs: &[Arc<dyn ExecutionPlan>],
-        ctx_state: &ExecutionContextState,
+        session_state: &SessionState,
     ) -> DFResult<Option<Arc<dyn ExecutionPlan>>> {
         // Check the custom nodes
         Ok(
@@ -238,6 +230,29 @@ impl ExtensionPlanner for SqlDatabaseQueryPlanner {
                     connector,
                     query: join_node.to_sql()?,
                     schema: Arc::new(schema),
+                }))
+            } else if let Some(node) = node.as_any().downcast_ref::<SqlProjectAggregateNode>() {
+                assert_eq!(logical_inputs.len(), 1, "input size inconsistent");
+                assert_eq!(physical_inputs.len(), 1, "input size inconsistent");
+                // Extract connectino from any of the logical inputs
+                let input = logical_inputs[0];
+                let connector = if let LogicalPlan::TableScan(TableScan { ref source, .. }) = input
+                {
+                    // TODO check which type to cast to
+                    let source = source
+                        .as_any()
+                        .downcast_ref::<PostgresTableProvider>()
+                        .unwrap();
+                    source.connection().to_connector()
+                } else {
+                    return Ok(None);
+                };
+                // let schema = Arc::new(join_node.schema.as_ref().into());
+                let schema = physical_inputs[0].schema();
+                Some(Arc::new(DatabaseExec {
+                    connector,
+                    query: dbg!(node.to_sql()?),
+                    schema,
                 }))
             } else {
                 None

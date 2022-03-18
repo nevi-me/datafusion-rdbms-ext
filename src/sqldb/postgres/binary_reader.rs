@@ -215,7 +215,6 @@ pub(super) async fn read_from_binary(
                     arrays.push(make_array(data))
                 }
                 DataType::FixedSizeBinary(_) => {
-                    // TODO: do we need to calculate any offsets?
                     let data = ArrayData::try_new(
                         f.data_type().clone(),
                         n.len(),
@@ -279,7 +278,19 @@ pub(super) async fn read_from_binary(
                 DataType::Dictionary(_, _) => panic!("Reading dictionary arrays not implemented"),
                 DataType::Union(_, _) => panic!("Union not supported"),
                 DataType::Null => panic!("Null not supported"),
-                DataType::Decimal(_, _) => todo!(),
+                DataType::Decimal(_, _) => {
+                    let data = ArrayData::try_new(
+                        f.data_type().clone(),
+                        n.len(),
+                        Some(null_count),
+                        Some(null_buffer),
+                        0,
+                        vec![Buffer::from(b)],
+                        vec![],
+                    )
+                    .unwrap();
+                    arrays.push(make_array(data))
+                }
                 DataType::Map(_, _) => panic!("Map not supported"),
             }
         });
@@ -319,7 +330,7 @@ fn read_col<R: Buf>(reader: &mut R, data_type: &DataType, length: usize) -> Resu
         DataType::LargeBinary => return Err(()),
         DataType::LargeUtf8 => return Err(()),
         DataType::LargeList(_) => return Err(()),
-        DataType::Decimal(p, s) => read_decimal(reader, length, *p, *s),
+        DataType::Decimal(_, s) => read_decimal(reader, *s),
         _ => return Err(()),
     })
 }
@@ -380,13 +391,54 @@ fn read_time64<R: Buf>(reader: &mut R) -> Vec<u8> {
     { reader.get_i32() as i64 }.to_le_bytes().to_vec()
 }
 
-fn read_decimal<R: Buf>(reader: &mut R, len: usize, _p: usize, _s: usize) -> Vec<u8> {
+fn read_decimal<R: Buf>(reader: &mut R, target_scale: usize) -> Vec<u8> {
     let num_groups = reader.get_u16();
     let weight = reader.get_i16();
+
+    // TODO handle NaN and +/-Inf
     let sign = reader.get_u16();
-    let scale = reader.get_u16();
-    dbg!(num_groups, weight, sign, scale, len);
-    todo!()
+    let _scale = reader.get_u16();
+    let digits = (0..num_groups)
+        .map(|_| reader.get_u16())
+        .collect::<Vec<_>>();
+
+    // If there are no digits, return 0
+    if num_groups == 0 {
+        return vec![0; 16];
+    }
+
+    if num_groups == 1 && weight == 1 {
+        return (digits[0] as i128 * 10i128.pow(4 + target_scale as u32))
+            .to_le_bytes()
+            .to_vec();
+    }
+
+    let integer_count = (weight + 1) as usize;
+    let mut result = 0i128;
+
+    // Integers
+    let integers = &digits[0..integer_count];
+    integers.iter().enumerate().for_each(|(i, integer)| {
+        let mul_scale = (integer_count - i - 1) * 4 + target_scale;
+        result += (*integer as i128) * 10i128.pow(mul_scale as u32);
+    });
+    // Fractions
+    let fractions = &digits[integer_count..];
+    fractions.iter().enumerate().for_each(|(i, fraction)| {
+        let mul_scale: i32 = target_scale as i32 - (4 * (i + 1) as i32);
+        if mul_scale >= 0 {
+            result += (*fraction as i128) * 10i128.pow(mul_scale as u32);
+        } else {
+            result += (*fraction as i128) / 10i128.pow(-mul_scale as u32);
+        }
+    });
+
+    // Sign
+    if sign == 0x4000 {
+        result *= -1;
+    }
+
+    result.to_le_bytes().to_vec()
 }
 
 #[cfg(test)]
@@ -406,7 +458,6 @@ mod tests {
         let catalog = pg_conn.load_catalog().await.unwrap();
         let table_provider = catalog.schema("public").unwrap().table("customer").unwrap();
         let schema = table_provider.schema();
-        dbg!(&schema);
         let (mut client, connection) = pg_conn.connect().await.unwrap();
         tokio::spawn(async move {
             if let Err(e) = connection.await {
@@ -414,9 +465,10 @@ mod tests {
             }
         });
 
-        let reader = get_binary_reader(&mut client, "select * from bench.public.customer")
-            .await
-            .unwrap();
+        let query =
+            "select * from bench.public.customer where c_acctbal < -90 order by c_acctbal limit 2";
+
+        let reader = get_binary_reader(&mut client, query).await.unwrap();
         let batch = read_from_binary(reader, &schema).await.unwrap();
         dbg!(batch);
     }

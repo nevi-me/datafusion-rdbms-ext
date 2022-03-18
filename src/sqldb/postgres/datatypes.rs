@@ -145,13 +145,7 @@ impl TryFrom<PgDataType> for Field {
                 _ => Err(()),
             },
             "bigint" => Ok(DataType::Int64),
-            "\"char\"" | "character" => {
-                if field.char_max_length == Some(1) {
-                    Ok(DataType::UInt8)
-                } else {
-                    Ok(DataType::Utf8)
-                }
-            }
+            "\"char\"" | "character" => Ok(DataType::Utf8),
             // "anyarray" | "ARRAY" => Err(()),
             "boolean" => Ok(DataType::Boolean),
             "bytea" => Ok(DataType::Binary),
@@ -161,7 +155,9 @@ impl TryFrom<PgDataType> for Field {
             // "inet" => Err(()),
             "interval" => Ok(DataType::Interval(IntervalUnit::DayTime)), // TODO: use appropriate unit
             // "name" => Err(()),
-            "numeric" => Ok(DataType::Decimal(32, 8)),
+            // This is a default that I have set, we can change to something saner
+            // Ideally we should get the default precision from the DB if it is set
+            "numeric" => Ok(DataType::Decimal(38, 10)),
             // "oid" => Err(()),
             "real" => Ok(DataType::Float32),
             "smallint" => Ok(DataType::Int16),

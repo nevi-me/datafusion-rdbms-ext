@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use datafusion::{
     arrow::{datatypes::Schema, error::Result as ArrowResult, record_batch::RecordBatch},
-    catalog::schema::SchemaProvider,
+    catalog::{catalog::CatalogProvider, schema::SchemaProvider},
     error::DataFusionError,
     physical_plan::SendableRecordBatchStream,
 };
@@ -121,7 +121,7 @@ impl PostgresConnection {
             }
 
             // Register schema in the database catalog
-            catalog.register_schema(schema, Arc::new(schema_catalog));
+            catalog.register_schema(&schema, Arc::new(schema_catalog));
         }
 
         Ok(catalog)

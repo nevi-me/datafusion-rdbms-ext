@@ -6,7 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-datafusion = { path = "../arrow-datafusion/datafusion" }
+# Currently depends on some minor changes to DataFusion (TableSource)
+datafusion = { git = "https://github.com/apache/arrow-datafusion", branch = "rdbms-changes" }
 async-trait = "0.1"
 futures-util = "0.3"
 # TODO: create separate features for sources, link them to DB dialects
@@ -17,3 +18,7 @@ bytes = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros"] }
+
+[profile.dev]
+# Run tests with some optimization to speed them up
+opt-level = 1

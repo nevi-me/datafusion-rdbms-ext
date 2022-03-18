@@ -10,6 +10,7 @@ use datafusion::{
         TableType,
     },
     error::{DataFusionError, Result as DfResult},
+    execution::context::TaskContext,
     logical_plan::Expr,
     physical_plan::ExecutionPlan,
 };
@@ -190,15 +191,14 @@ impl ExecutionPlan for PostgresExec {
     async fn execute(
         &self,
         partition: usize,
-        _runtime: Arc<datafusion::execution::runtime_env::RuntimeEnv>,
+        _context: Arc<TaskContext>,
     ) -> DfResult<datafusion::physical_plan::SendableRecordBatchStream> {
-
         let (response_tx, response_rx): (
             Sender<ArrowResult<RecordBatch>>,
             Receiver<ArrowResult<RecordBatch>>,
         ) = channel(2);
 
-        let partition = self.partitions.get(partition).unwrap().clone();
+        let partition = self.partitions.get(partition).unwrap();
 
         let connection = partition.connection.clone();
         let query = partition.query.clone();
@@ -224,19 +224,18 @@ impl ExecutionPlan for PostgresExec {
 
 // TODO: add dialect
 fn supports_filter_pushdown(filter: &Expr) -> FPD {
-    dbg!(filter);
     match filter {
         Expr::Alias(expr, _) => supports_filter_pushdown(expr),
         Expr::Column(_) => FPD::Exact,
-        Expr::ScalarVariable(_) => FPD::Unsupported,
+        Expr::ScalarVariable(_, _) => FPD::Unsupported,
         Expr::Literal(_) => FPD::Exact,
-        Expr::BinaryExpr { .. } => FPD::Inexact,
+        Expr::BinaryExpr { .. } => FPD::Exact,
         Expr::Not(expr) => supports_filter_pushdown(expr),
         Expr::IsNotNull(expr) => supports_filter_pushdown(expr),
         Expr::IsNull(expr) => supports_filter_pushdown(expr),
         Expr::Negative(expr) => supports_filter_pushdown(expr),
         Expr::GetIndexedField { .. } => FPD::Unsupported,
-        Expr::Between { .. } => FPD::Unsupported,
+        Expr::Between { expr, .. } => supports_filter_pushdown(expr),
         Expr::Case { .. } => FPD::Unsupported,
         Expr::Cast { expr, data_type } => {
             // If the expression can be pushed down, then we should be able to cast it
@@ -270,7 +269,8 @@ fn supports_filter_pushdown(filter: &Expr) -> FPD {
         Expr::AggregateFunction { .. } => FPD::Unsupported,
         Expr::WindowFunction { .. } => FPD::Unsupported,
         Expr::AggregateUDF { .. } => FPD::Unsupported,
-        Expr::InList { .. } => FPD::Unsupported,
+        // TODO: I think I was still working on this
+        Expr::InList { expr, .. } => FPD::Exact,
         Expr::Wildcard => FPD::Unsupported,
     }
 }

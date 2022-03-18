@@ -17,17 +17,6 @@ impl DatabaseCatalog {
             schemas: RwLock::default(),
         }
     }
-
-    /// Adds a new schema to this catalog.
-    /// If a schema of the same name existed before, it is replaced in the catalog and returned.
-    pub fn register_schema(
-        &self,
-        name: impl Into<String>,
-        schema: Arc<dyn catalog::schema::SchemaProvider>,
-    ) -> Option<Arc<dyn catalog::schema::SchemaProvider>> {
-        let mut schemas = self.schemas.write().unwrap();
-        schemas.insert(name.into(), schema)
-    }
 }
 
 impl catalog::catalog::CatalogProvider for DatabaseCatalog {
@@ -44,9 +33,19 @@ impl catalog::catalog::CatalogProvider for DatabaseCatalog {
         let schemas = self.schemas.read().unwrap();
         schemas.get(name).cloned()
     }
+
+    fn register_schema(
+        &self,
+        name: &str,
+        schema: Arc<dyn catalog::schema::SchemaProvider>,
+    ) -> Option<Arc<dyn catalog::schema::SchemaProvider>> {
+        let mut schemas = self.schemas.write().unwrap();
+        schemas.insert(name.into(), schema)
+    }
 }
 
 pub struct SchemaCatalog {
+    // TODO: this might not be needed, I left it here in case there's use for it
     schema_name: String,
     tables: RwLock<HashMap<String, Arc<dyn TableProvider>>>,
 }

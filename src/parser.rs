@@ -30,7 +30,19 @@ impl LogicalPlanSqlExt for LogicalPlanExt {
 /// TODO: should take dialect as an input
 pub fn logical_plan_to_sql(plan: &LogicalPlan, dialect: DatabaseDialect) -> DfResult<String> {
     Ok(match plan {
-        LogicalPlan::Projection(_) => todo!(),
+        LogicalPlan::Projection(projection) => {
+            let projected = projection
+                .expr
+                .iter()
+                .map(|expr| expr_to_sql(expr, dialect))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "SELECT {} FROM {}",
+                projected,
+                logical_plan_to_sql(&projection.input, dialect)?
+            )
+        }
         LogicalPlan::Filter(filter) => {
             // A filter can loosely be expressed as "select * from input where {predicate}"
             // While this nests a table select, we ordinarily expect to generate SQL code
@@ -43,7 +55,30 @@ pub fn logical_plan_to_sql(plan: &LogicalPlan, dialect: DatabaseDialect) -> DfRe
             )
         }
         LogicalPlan::Window(_) => todo!(),
-        LogicalPlan::Aggregate(_) => todo!(),
+        LogicalPlan::Aggregate(aggregate) => {
+            let proj = aggregate
+                .aggr_expr
+                .iter()
+                .map(|expr| expr_to_sql(expr, dialect))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let aggr = aggregate
+                .group_expr
+                .iter()
+                .map(|expr| expr_to_sql(expr, dialect))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "SELECT {} FROM {}{}",
+                proj,
+                if aggregate.group_expr.is_empty() {
+                    ""
+                } else {
+                    " GROUP BY "
+                },
+                aggr
+            )
+        }
         LogicalPlan::Sort(_) => todo!(),
         LogicalPlan::Join(_) => todo!(),
         LogicalPlan::CrossJoin(_) => todo!(),
@@ -66,7 +101,8 @@ pub fn logical_plan_to_sql(plan: &LogicalPlan, dialect: DatabaseDialect) -> DfRe
                 scan.filters
                     .iter()
                     .map(|filter| expr_to_sql(filter, dialect))
-                    .fold(String::from(" WHERE "), |a, b| a + ", " + &b)
+                    .fold(String::from(" WHERE "), |a, b| a + "AND " + &b)
+                    .replace("WHERE AND ", "WHERE ")
             };
             format!(
                 "SELECT {} FROM {}{}{}",
@@ -87,17 +123,57 @@ pub fn logical_plan_to_sql(plan: &LogicalPlan, dialect: DatabaseDialect) -> DfRe
         LogicalPlan::Explain(_) => todo!(),
         LogicalPlan::Analyze(_) => todo!(),
         LogicalPlan::Extension(_) => todo!(),
+        LogicalPlan::CreateCatalogSchema(_) => todo!(),
     })
 }
 
+/// Parses the expression to SQL code
 pub fn expr_to_sql(expr: &Expr, _dialect: DatabaseDialect) -> String {
+    use datafusion::scalar::ScalarValue;
     match expr {
         Expr::Alias(expr, alias) => {
             format!("{} AS {}", expr_to_sql(expr, _dialect), alias)
         }
         Expr::Column(col) => col.name.clone(),
-        Expr::ScalarVariable(_) => todo!(),
-        Expr::Literal(lit) => lit.to_string(),
+        Expr::ScalarVariable(_, _) => todo!(),
+        // Date32 gets written as the i32 number, which won't work on SQL DBs
+        Expr::Literal(lit) => match lit {
+            // ScalarValue::Boolean(_) => todo!(),
+            // ScalarValue::Float32(_) => todo!(),
+            // ScalarValue::Float64(_) => todo!(),
+            // ScalarValue::Decimal128(_, _, _) => todo!(),
+            // ScalarValue::Int8(_) => todo!(),
+            // ScalarValue::Int16(_) => todo!(),
+            // ScalarValue::Int32(_) => todo!(),
+            // ScalarValue::Int64(_) => todo!(),
+            // ScalarValue::UInt8(_) => todo!(),
+            // ScalarValue::UInt16(_) => todo!(),
+            // ScalarValue::UInt32(_) => todo!(),
+            // ScalarValue::UInt64(_) => todo!(),
+            ScalarValue::Utf8(value) | ScalarValue::LargeUtf8(value) => match value {
+                Some(string) => format!("'{string}'"),
+                None => "NULL".to_string(),
+            },
+            // ScalarValue::Binary(_) => todo!(),
+            // ScalarValue::LargeBinary(_) => todo!(),
+            // ScalarValue::List(_, _) => todo!(),
+            ScalarValue::Date32(None) => "NULL".to_string(),
+            ScalarValue::Date32(Some(value)) => {
+                let datetime = datafusion::arrow::temporal_conversions::date32_to_datetime(*value);
+                let date = datetime.format("%Y-%m-%d").to_string();
+                format!("'{date}'")
+            }
+            // ScalarValue::Date64(_) => todo!(),
+            // ScalarValue::TimestampSecond(_, _) => todo!(),
+            // ScalarValue::TimestampMillisecond(_, _) => todo!(),
+            // ScalarValue::TimestampMicrosecond(_, _) => todo!(),
+            // ScalarValue::TimestampNanosecond(_, _) => todo!(),
+            // ScalarValue::IntervalYearMonth(_) => todo!(),
+            // ScalarValue::IntervalDayTime(_) => todo!(),
+            // ScalarValue::IntervalMonthDayNano(_) => todo!(),
+            // ScalarValue::Struct(_, _) => todo!(),
+            _ => lit.to_string(),
+        },
         Expr::BinaryExpr { left, op, right } => {
             // TODO: expand into a match statement if some ops don't translate to SQL
             match op {
@@ -133,7 +209,24 @@ pub fn expr_to_sql(expr: &Expr, _dialect: DatabaseDialect) -> String {
             format!("-({})", expr)
         }
         Expr::GetIndexedField { .. } => todo!(),
-        Expr::Between { .. } => todo!(),
+        Expr::Between {
+            expr,
+            negated,
+            low,
+            high,
+        } => {
+            format!(
+                "{}{}{} AND {}",
+                expr_to_sql(expr, _dialect),
+                if *negated {
+                    " NOT BETWEEN "
+                } else {
+                    " BETWEEN "
+                },
+                expr_to_sql(low, _dialect),
+                expr_to_sql(high, _dialect)
+            )
+        }
         Expr::Case { .. } => {
             todo!()
         }
@@ -159,7 +252,23 @@ pub fn expr_to_sql(expr: &Expr, _dialect: DatabaseDialect) -> String {
         Expr::AggregateFunction { .. } => todo!(),
         Expr::WindowFunction { .. } => todo!(),
         Expr::AggregateUDF { .. } => todo!(),
-        Expr::InList { .. } => todo!(),
+        Expr::InList {
+            expr,
+            list,
+            negated,
+        } => {
+            let list = list
+                .iter()
+                .map(|expr| expr_to_sql(expr, _dialect))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "{} {}({})",
+                expr_to_sql(expr, _dialect),
+                if *negated { "NOT IN " } else { "IN" },
+                list
+            )
+        }
         Expr::Wildcard => todo!(),
     }
 }
