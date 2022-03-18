@@ -1,0 +1,10 @@
+version: "3"
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: postgres.Dockerfile
+    ports:
+      - 5432:5432
+    volumes:
+      - ./data/:/data/

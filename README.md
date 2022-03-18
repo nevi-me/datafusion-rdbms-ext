@@ -16,10 +16,13 @@ The ongoing work on Spark convinces me that DataFusion could benefit from simila
 Should I be able to progress with this, my goals would be to allow:
 
 - [ ] Connecting DF to a SQL server, and letting it generate a catalog from schemas and tables
+  - This is working for PostgreSQL, we rely on the `INFORMATION_SCHEMA` catalog
 - [ ] Accessing tables in the normal `LogicalPlan::TableScan` fashion, with filter and projection pushdown
+  - Partially working for PostgreSQL, filter predicates are somehow not working yet
 - [ ] Custom logical and physical nodes/extensions to recognise when plans that could be pushed to the database, can be.
   - [ ] Aggregations and window functions, as these can significantly reduce the volume of data coming from the source
   - [ ] Joins between tables in the same database (or server in MSSQL case)
+    - Joins are partially working, but have to iron out issues and find better ways of writing SQL
 - [ ] Some offline/online gathering of statistics to aid with choosing when to read & compute on DF vs on the DB
 
 ## Target Databases
@@ -44,4 +47,9 @@ A heavily optimised OLAP database can often perform joins + aggregates with a lo
 
 I personally see DF (more Ballista) as very fitting in a federated query engine space. I would want to replace Dremio, SAP HANA, Presto, etc with it. For DF/Ballista to reach a position where one can replace these engines with it, it'd need a lot of data source connectivity. Not only for pulling data, but also for efficiently choosing when to push compute to source vs loading data.
 
-For example, I've previously worked on a draft of a MongoDB DataFusion source, which worked reasonably, and with effort and tuning could grant the user a neat SQL interface into MongoDB data.
+For example, I've previously worked on a draft of a MongoDB DataFusion source, which worked reasonably, and with effort and tuning could grant the user a neat SQL interface into MondoDB data.
+
+# Testing
+
+We test using generated TPC-H data. It is currently up to the end-user/developer to generate this data into the `testdata/data` directory.
+After generating the data, a Postgres DB `bench` can be started. It will load the data on its first run.
