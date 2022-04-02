@@ -1,23 +1,17 @@
 use std::{collections::HashMap, sync::Arc};
 
 use datafusion::{
-    arrow::{datatypes::Schema, error::Result as ArrowResult, record_batch::RecordBatch},
+    arrow::{datatypes::SchemaRef, error::Result as ArrowResult, record_batch::RecordBatch},
     catalog::{catalog::CatalogProvider, schema::SchemaProvider},
     error::DataFusionError,
-    physical_plan::SendableRecordBatchStream,
 };
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::mpsc::Sender;
 use tokio_postgres::{tls::NoTlsStream, Client, Connection, NoTls, Socket};
-use tokio_stream::wrappers::ReceiverStream;
 
-use crate::{
-    catalog::{DatabaseCatalog, SchemaCatalog},
-    physical_plan::DatabaseStream,
-};
+use crate::catalog::{DatabaseCatalog, SchemaCatalog};
 
 use self::{
-    binary_reader::{get_binary_reader, read_from_binary},
-    datatypes::info_schema_table_to_schema,
+    binary_reader::read_from_query, datatypes::info_schema_table_to_schema,
     table_provider::PostgresTableProvider,
 };
 
@@ -62,7 +56,7 @@ impl PostgresConnection {
         }
     }
 
-    async fn connect(&self) -> Result<(Client, Connection<Socket, NoTlsStream>), ()> {
+    pub async fn connect(&self) -> Result<(Client, Connection<Socket, NoTlsStream>), ()> {
         Ok(
             tokio_postgres::connect(&self.params.connection_string, NoTls)
                 .await
@@ -121,7 +115,9 @@ impl PostgresConnection {
             }
 
             // Register schema in the database catalog
-            catalog.register_schema(&schema, Arc::new(schema_catalog)).unwrap();
+            catalog
+                .register_schema(&schema, Arc::new(schema_catalog))
+                .unwrap();
         }
 
         Ok(catalog)
@@ -137,41 +133,10 @@ impl DatabaseConnection for PostgresConnection {
     async fn fetch_query(
         &self,
         query: &str,
-        schema: &Schema,
-    ) -> Result<SendableRecordBatchStream, DataFusionError> {
+        schema: SchemaRef,
+        sender: Sender<ArrowResult<RecordBatch>>,
+    ) -> Result<(), DataFusionError> {
         // Connect to database
-        let (mut client, connection) = self.connect().await.unwrap();
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("Postgres onnection error: {}", e);
-            }
-        });
-
-        let (response_tx, response_rx): (
-            Sender<ArrowResult<RecordBatch>>,
-            Receiver<ArrowResult<RecordBatch>>,
-        ) = channel(2);
-
-        let reader = get_binary_reader(&mut client, query).await.unwrap();
-        let batches = read_from_binary(reader, schema).await.unwrap();
-
-        tokio::task::spawn(async move {
-            response_tx.send(Ok(batches)).await.expect("Unable to send"); // TODO handle this error
-        })
-        .await
-        .expect("Unable to spawn task"); // TODO: handle this error
-
-        Ok(Box::pin(DatabaseStream {
-            schema: schema.clone().into(),
-            inner: ReceiverStream::new(response_rx),
-        }))
-    }
-
-    async fn fetch_table(
-        &self,
-        table_path: &str,
-        _schema: &Schema,
-    ) -> Result<SendableRecordBatchStream, DataFusionError> {
         let (client, connection) = self.connect().await.unwrap();
         tokio::spawn(async move {
             if let Err(e) = connection.await {
@@ -179,12 +144,28 @@ impl DatabaseConnection for PostgresConnection {
             }
         });
 
-        let query = format!("select * from {}", table_path);
+        read_from_query(&client, query, schema.clone(), sender).await
+    }
 
-        let _result = client.query(&query, &[]).await.map_err(|_| ()).unwrap();
-        Err(DataFusionError::NotImplemented(
-            "Fetching table not yet implemented".to_string(),
-        ))
+    async fn count_records(&self, query: &str) -> Result<Option<usize>, DataFusionError> {
+        let (client, connection) = self.connect().await.unwrap();
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("Postgres onnection error: {}", e);
+            }
+        });
+
+        let wrapped_query = format!("SELECT COUNT(*) as records FROM ({query}) a");
+
+        let result = client.query_one(&wrapped_query, &[]).await;
+        match result {
+            Ok(row) => {
+                let count = row.get::<_, i64>(0);
+                let count: Option<usize> = count.try_into().ok();
+                Ok(count)
+            }
+            _ => Ok(None),
+        }
     }
 }
 

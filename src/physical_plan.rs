@@ -92,19 +92,17 @@ impl ExecutionPlan for DatabaseExec {
         let (response_tx, response_rx): (
             Sender<ArrowResult<RecordBatch>>,
             Receiver<ArrowResult<RecordBatch>>,
-        ) = channel(2);
+        ) = channel(2000);
 
         let connector = self.connector.clone();
         let query = self.query.clone();
         let schema = self.schema();
 
-        tokio::task::spawn(async move {
-            let reader = connector.into_connection();
-            let mut response = reader.fetch_query(&query, &schema).await.unwrap();
-            while let Some(value) = response.next().await {
-                response_tx.send(value).await.unwrap();
-            }
-        });
+        let reader = connector.into_connection();
+        reader
+            .fetch_query(&query, schema.clone(), response_tx)
+            .await
+            .unwrap();
 
         Ok(Box::pin(DatabaseStream {
             schema: self.schema(),
