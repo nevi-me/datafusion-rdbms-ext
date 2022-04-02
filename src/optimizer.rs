@@ -55,7 +55,7 @@ impl OptimizerRule for JoinOptimizerRule {
                         left_scan.source.table_source(),
                         right_scan.source.table_source(),
                     ) {
-                        if server_left.eq(&server_right)
+                        if server_left.eq(server_right)
                             && db_left.eq(&db_right)
                             && schema_left.eq(schema_right)
                         {
@@ -66,7 +66,7 @@ impl OptimizerRule for JoinOptimizerRule {
                                 node: Arc::new(SqlJoinPlanNode {
                                     left_input,
                                     right_input,
-                                    join_type: join.join_type.clone(),
+                                    join_type: join.join_type,
                                     on: join.on.clone(),
                                     schema: plan.schema().clone(),
                                 }),
@@ -100,7 +100,7 @@ impl OptimizerRule for JoinOptimizerRule {
                     left_scan.source.table_source(),
                     right_scan.source.table_source(),
                 ) {
-                    if server_left.eq(&server_right)
+                    if server_left.eq(server_right)
                         && db_left.eq(&db_right)
                         && schema_left.eq(schema_right)
                     {
@@ -117,7 +117,7 @@ impl OptimizerRule for JoinOptimizerRule {
                             node: Arc::new(SqlJoinPlanNode {
                                 left_input,
                                 right_input,
-                                join_type: join.join_type.clone(),
+                                join_type: join.join_type,
                                 on: join.on.clone(),
                                 schema: plan.schema().clone(),
                             }),

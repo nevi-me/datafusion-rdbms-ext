@@ -270,6 +270,7 @@ pub fn expr_to_sql(expr: &Expr, _dialect: DatabaseDialect) -> String {
             )
         }
         Expr::Wildcard => todo!(),
+        Expr::QualifiedWildcard { .. } => todo!(),
     }
 }
 

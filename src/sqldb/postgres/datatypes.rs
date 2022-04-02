@@ -89,7 +89,7 @@ pub fn pg_to_arrow_type(dt: &Type) -> Option<DataType> {
         //        &VARBIT => None,
         //        &NUMERIC => None,
         //        &UUID => None,
-        t @ _ => panic!("Postgres type {:?} not supported", t),
+        t => panic!("Postgres type {:?} not supported", t),
     }
 }
 

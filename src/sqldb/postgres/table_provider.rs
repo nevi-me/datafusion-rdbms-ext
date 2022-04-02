@@ -104,7 +104,7 @@ impl TableProvider for PostgresTableProvider {
         let filter = if !filters.is_empty() {
             let mut sql_filters = filters.iter().map(|expr| expr_to_sql(expr, dialect));
             let mut out = String::from(" WHERE ");
-            sql_filters.next().map(|s| out.push_str(&s));
+            if let Some(s) = sql_filters.next() { out.push_str(&s) }
             sql_filters.fold(out, |a, b| a + " AND " + &b)
         } else {
             String::new()
@@ -270,7 +270,8 @@ fn supports_filter_pushdown(filter: &Expr) -> FPD {
         Expr::WindowFunction { .. } => FPD::Unsupported,
         Expr::AggregateUDF { .. } => FPD::Unsupported,
         // TODO: I think I was still working on this
-        Expr::InList { expr, .. } => FPD::Exact,
+        Expr::InList { .. } => FPD::Exact,
         Expr::Wildcard => FPD::Unsupported,
+        Expr::QualifiedWildcard { .. } => FPD::Unsupported,
     }
 }
