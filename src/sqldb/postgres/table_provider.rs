@@ -14,7 +14,6 @@ use datafusion::{
     logical_plan::Expr,
     physical_plan::ExecutionPlan,
 };
-use futures_util::StreamExt;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -104,30 +103,62 @@ impl TableProvider for PostgresTableProvider {
         let filter = if !filters.is_empty() {
             let mut sql_filters = filters.iter().map(|expr| expr_to_sql(expr, dialect));
             let mut out = String::from(" WHERE ");
-            if let Some(s) = sql_filters.next() { out.push_str(&s) }
+            if let Some(s) = sql_filters.next() {
+                out.push_str(&s)
+            }
             sql_filters.fold(out, |a, b| a + " AND " + &b)
         } else {
             String::new()
         };
-        let limit = match limit {
+        let record_limit = match limit {
             Some(limit) => format!(" LIMIT {}", limit),
             None => String::new(),
         };
+
         let query = format!(
             "SELECT {projection} FROM {table}{filter}{limit}",
             projection = projection,
             table = table,
             filter = filter,
-            limit = limit
+            limit = record_limit
         );
 
-        Ok(Arc::new(PostgresExec {
-            partitions: vec![QueryPartition {
+        // Determine number of partitions
+        // TODO: Check which queries are faster, i.e. can we just use limit if it's there?
+        let partitions = match self.connection.count_records(&query).await {
+            Ok(Some(count)) => {
+                let maximum = limit.unwrap_or(usize::MAX).min(count);
+                // TODO: configure partition number
+                let partition_size = 4;
+                let records_per_partition = (maximum + partition_size - 1) / partition_size;
+                let mut cum_offset = 0;
+                (0..partition_size)
+                    .map(|_| {
+                        let offset = cum_offset;
+                        cum_offset += records_per_partition;
+                        let query = format!(
+                        "SELECT {projection} FROM {table}{filter} limit {limit} offset {offset}",
+                        projection = projection,
+                        table = table,
+                        filter = filter,
+                        limit = records_per_partition,
+                        offset = offset
+                    );
+                        println!("Partitioned query: {query}");
+                        QueryPartition {
+                            connection: self.connection.clone(),
+                            query,
+                        }
+                    })
+                    .collect()
+            }
+            _ => vec![QueryPartition {
                 connection: self.connection.clone(),
                 query,
             }],
-            schema,
-        }))
+        };
+
+        Ok(Arc::new(PostgresExec { partitions, schema }))
     }
 
     fn supports_filter_pushdown(&self, filter: &Expr) -> DfResult<FPD> {
@@ -196,7 +227,7 @@ impl ExecutionPlan for PostgresExec {
         let (response_tx, response_rx): (
             Sender<ArrowResult<RecordBatch>>,
             Receiver<ArrowResult<RecordBatch>>,
-        ) = channel(2);
+        ) = channel(2000);
 
         let partition = self.partitions.get(partition).unwrap();
 
@@ -204,12 +235,9 @@ impl ExecutionPlan for PostgresExec {
         let query = partition.query.clone();
         let schema = self.schema();
 
-        tokio::task::spawn(async move {
-            let mut response = connection.fetch_query(&query, &schema).await.unwrap();
-            while let Some(value) = response.next().await {
-                response_tx.send(value).await.unwrap();
-            }
-        });
+        connection
+            .fetch_query(&query, schema.clone(), response_tx)
+            .await?;
 
         Ok(Box::pin(DatabaseStream {
             schema: self.schema(),

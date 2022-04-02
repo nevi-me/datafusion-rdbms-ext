@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 # Currently depends on some minor changes to DataFusion (TableSource)
-datafusion = { git = "https://github.com/apache/arrow-datafusion", branch = "rdbms-changes" }
+datafusion = { git = "https://github.com/apache/arrow-datafusion", branch = "rdbms-changes", features = ["jit"] }
 async-trait = "0.1"
 futures-util = "0.3"
 # TODO: create separate features for sources, link them to DB dialects

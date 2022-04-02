@@ -1,46 +1,52 @@
-use std::{io::Write, sync::Arc};
+use std::sync::Arc;
 
 use bytes::Buf;
 use datafusion::arrow::array::*;
-use datafusion::arrow::buffer::Buffer;
-use datafusion::arrow::datatypes::{DataType, Schema, ToByteSlice};
+use datafusion::arrow::buffer::{Buffer, MutableBuffer};
+use datafusion::arrow::datatypes::{DataType, SchemaRef, ToByteSlice};
+use datafusion::arrow::error::Result as ArrowResult;
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::error::{DataFusionError, Result};
 use futures_util::StreamExt;
+use tokio::sync::mpsc::Sender;
 use tokio_postgres::Client;
-use tokio_postgres::CopyOutStream;
+
+use crate::error::RdbmsError;
 
 /// PGCOPY header
 const MAGIC: &[u8] = b"PGCOPY\n\xff\r\n\0";
 const EPOCH_DAYS: i32 = 10957;
 const EPOCH_MICROS: i64 = 946684800000000;
 
-pub(super) async fn get_binary_reader<'a>(
-    client: &'a mut Client,
+// TODO expose these via a struct with a read trait. This would be so we can expose
+// the same interface for both a binary and row reader.
+pub async fn read_from_query<'a>(
+    client: &'a Client,
     query: &str,
-) -> Result<CopyOutStream, ()> {
-    dbg!(&query);
-    Ok(client
-        .copy_out(format!("COPY ({}) TO stdout with (format binary)", query).as_str())
+    schema: SchemaRef,
+    sender: Sender<ArrowResult<RecordBatch>>,
+) -> Result<()> {
+    let reader = client
+        .copy_out(format!("copy ({}) to stdout with (format binary)", query).as_str())
         .await
-        .unwrap())
-}
+        .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
-pub(super) async fn read_from_binary(
-    reader: CopyOutStream,
-    schema: &Schema,
-) -> Result<RecordBatch, ()> {
     futures_util::pin_mut!(reader);
+    // TODO: move this to a configuration
+    let batch_size = 65536;
+
     let mut buf = reader.next().await.unwrap().unwrap();
-    // for values in reader.next().await.unwrap() {}
     // read signature
     let mut bytes = [0u8; 11];
     buf.copy_to_slice(&mut bytes);
     if bytes != MAGIC {
-        eprintln!("Unexpected binary format type");
-        // return Err(DataFrameError::IoError(
-        //     "Unexpected Postgres binary type".to_string(),
-        // ));
-        return Err(());
+        // Return error from stream
+        let t: Result<()> = Err(RdbmsError::DatabaseError(format!(
+            "Unexpected Postgres binary header {:x?}",
+            bytes
+        ))
+        .into());
+        t?
     }
     // read flags
     let _size = buf.get_u32();
@@ -51,9 +57,13 @@ pub(super) async fn read_from_binary(
     // Start reading the rest of the data
     let field_len = schema.fields().len();
 
-    let mut buffers: Vec<Vec<u8>> = vec![vec![]; field_len];
-    let mut null_buffers: Vec<Vec<bool>> = vec![vec![]; field_len];
-    let mut offset_buffers: Vec<Vec<i32>> = vec![vec![]; field_len];
+    let mut buffers: Vec<MutableBuffer> = (0..field_len)
+        .map(|_| MutableBuffer::new(batch_size))
+        .collect();
+    let mut null_buffers: Vec<BooleanBufferBuilder> = (0..field_len)
+        .map(|_| BooleanBufferBuilder::new(batch_size))
+        .collect();
+    let mut offset_buffers: Vec<Vec<i32>> = vec![Vec::with_capacity(batch_size); field_len];
 
     let default_values: Vec<Vec<u8>> = schema
         .fields()
@@ -91,14 +101,12 @@ pub(super) async fn read_from_binary(
             DataType::LargeUtf8 => vec![],
             DataType::LargeList(_) => vec![],
             DataType::Decimal(_, _) => vec![0; 16],
-            t => panic!("unsupported type {t}"),
+            t => panic!("Unsupported type {:?}", t),
         })
         .collect();
 
-    let mut record_num = -1;
-
+    let mut record_num = 0;
     while buf.has_remaining() {
-        record_num += 1;
         // tuple length
         let size = buf.get_i16();
         if size == -1 {
@@ -117,7 +125,7 @@ pub(super) async fn read_from_binary(
                     offset_buffers[i].push(col_length);
                 }
                 DataType::FixedSizeBinary(binary_size) => {
-                    offset_buffers[i].push(record_num * binary_size);
+                    offset_buffers[i].push((record_num as i32 + 1) * binary_size);
                 }
                 DataType::List(_) => {}
                 DataType::FixedSizeList(_, _) => {}
@@ -127,15 +135,41 @@ pub(super) async fn read_from_binary(
             // populate values
             if col_length == -1 {
                 // null value
-                null_buffers[i].push(false);
-                buffers[i].write_all(default_values[i].as_slice()).unwrap();
+                null_buffers[i].append(false);
+                buffers[i].extend_from_slice(default_values[i].as_slice());
             } else {
-                null_buffers[i].push(true);
+                null_buffers[i].append(true);
                 // big endian data, needs to be converted to little endian
-                let mut data = read_col(&mut buf, schema.field(i).data_type(), col_length as usize)
+                let data = read_col(&mut buf, schema.field(i).data_type(), col_length as usize)
                     .expect("Unable to read data");
-                buffers[i].append(&mut data);
+                buffers[i].extend_from_slice(&data);
             }
+        }
+
+        // Increment record count
+        record_num += 1;
+
+        // Check if to return batch
+        if record_num == batch_size {
+            let num_records = record_num as usize;
+            let batch = complete_batch(
+                buffers.drain(0..),
+                &mut null_buffers,
+                &mut offset_buffers,
+                num_records,
+                schema.clone(),
+            )?;
+            offset_buffers.iter_mut().for_each(|v| v.clear());
+            // null_buffers.iter_mut().map(|b| b.finish());
+            // Allocate new buffers
+            // TODO: we drop the MutableBuffers, is there a better way to do this?
+            buffers = (0..field_len)
+                .map(|_| MutableBuffer::new(batch_size))
+                .collect();
+            // println!("Yielding completed batch with {record_num} records");
+            // Reset records
+            record_num = 0;
+            sender.send(Ok(batch)).await.unwrap();
         }
 
         // Get more data if the buffer is exhausted
@@ -145,8 +179,9 @@ pub(super) async fn read_from_binary(
                     buf = more;
                 }
                 Some(Err(e)) => {
-                    eprintln!("{e}");
-                    return Err(());
+                    let t: Result<()> =
+                        Err(RdbmsError::DatabaseError(format!("Buffer error: {:?}", e)).into());
+                    t?
                 }
                 None => {
                     continue;
@@ -155,28 +190,51 @@ pub(super) async fn read_from_binary(
         }
     }
 
-    let mut arrays = vec![];
+    // Last batch
+    let num_records = record_num as usize;
+    if num_records > 0 {
+        // println!("Yielding incomplete batch with {num_records} records");
+        let batch = complete_batch(
+            buffers.drain(0..),
+            &mut null_buffers,
+            &mut offset_buffers,
+            num_records,
+            schema.clone(),
+        )?;
+        sender.send(Ok(batch)).await.unwrap();
+    }
+
+    Ok(())
+}
+
+/// Convert allocated data to [RecordBatch], then return empty vecs
+fn complete_batch(
+    buffers: impl Iterator<Item = MutableBuffer>,
+    null_buffers: &mut Vec<BooleanBufferBuilder>,
+    offset_buffers: &mut Vec<Vec<i32>>,
+    num_records: usize,
+    schema: SchemaRef,
+) -> Result<RecordBatch> {
+    let mut arrays = Vec::with_capacity(null_buffers.len());
     // build record batches
     buffers
-        .into_iter()
-        .zip(null_buffers.into_iter())
+        .zip(null_buffers.iter_mut())
         .zip(schema.fields().iter())
         .enumerate()
         .for_each(|(i, ((b, n), f))| {
-            let null_count = n.iter().filter(|v| v == &&false).count();
-            let mut null_buffer = BooleanBufferBuilder::new(n.len() / 8 + 1);
-            null_buffer.append_slice(&n[..]);
-            let null_buffer = null_buffer.finish();
+            // let null_count = n.iter().filter(|v| v == &&false).count();
+            let null_buffer = n.finish();
             match f.data_type() {
                 DataType::Boolean => {
+                    // TODO: verify that this is correct, or if we can create bool array directly from MutableBuffer
                     let bools = b.iter().map(|v| v == &0).collect::<Vec<bool>>();
                     let mut bool_buffer = BooleanBufferBuilder::new(bools.len());
                     bool_buffer.append_slice(&bools[..]);
                     let bool_buffer = bool_buffer.finish();
                     let data = ArrayData::try_new(
                         f.data_type().clone(),
-                        n.len(),
-                        Some(null_count),
+                        num_records,
+                        None,
                         Some(null_buffer),
                         0,
                         vec![bool_buffer],
@@ -204,11 +262,11 @@ pub(super) async fn read_from_binary(
                 | DataType::Interval(_) => {
                     let data = ArrayData::try_new(
                         f.data_type().clone(),
-                        n.len(),
-                        Some(null_count),
+                        num_records,
+                        None,
                         Some(null_buffer),
                         0,
-                        vec![Buffer::from(b)],
+                        vec![b.into()],
                         vec![],
                     )
                     .unwrap();
@@ -217,17 +275,17 @@ pub(super) async fn read_from_binary(
                 DataType::FixedSizeBinary(_) => {
                     let data = ArrayData::try_new(
                         f.data_type().clone(),
-                        n.len(),
-                        Some(null_count),
+                        num_records,
+                        None,
                         Some(null_buffer),
                         0,
-                        vec![Buffer::from(b)],
+                        vec![b.into()],
                         vec![],
                     )
                     .unwrap();
                     arrays.push(make_array(data))
                 }
-                DataType::Binary | DataType::Utf8 | DataType::LargeBinary | DataType::LargeUtf8 => {
+                DataType::Binary | DataType::Utf8 => {
                     // recontruct offsets
                     let mut offset = 0;
                     let mut offsets = vec![0];
@@ -237,24 +295,28 @@ pub(super) async fn read_from_binary(
                     });
                     let data = ArrayData::try_new(
                         f.data_type().clone(),
-                        n.len(),
-                        Some(null_count),
+                        num_records,
+                        None,
                         Some(null_buffer),
                         0,
-                        vec![Buffer::from(offsets.to_byte_slice()), Buffer::from(b)],
+                        vec![Buffer::from(offsets.to_byte_slice()), b.into()],
                         vec![],
                     )
                     .unwrap();
                     arrays.push(make_array(data))
                 }
+                DataType::LargeBinary | DataType::LargeUtf8 => {
+                    todo!()
+                }
                 DataType::List(_) | DataType::LargeList(_) => {
+                    // TODO: this is incorrect, no offsets included
                     let data = ArrayData::try_new(
                         f.data_type().clone(),
-                        n.len(),
-                        Some(null_count),
+                        num_records,
+                        None,
                         Some(null_buffer),
                         0,
-                        vec![Buffer::from(b)],
+                        vec![b.into()],
                         vec![],
                     )
                     .unwrap();
@@ -263,43 +325,36 @@ pub(super) async fn read_from_binary(
                 DataType::FixedSizeList(_, _) => {
                     let data = ArrayData::try_new(
                         f.data_type().clone(),
-                        n.len(),
-                        Some(null_count),
+                        num_records,
+                        None,
                         Some(null_buffer),
                         0,
-                        vec![Buffer::from(b)],
+                        vec![b.into()],
                         vec![],
                     )
                     .unwrap();
                     arrays.push(make_array(data))
                 }
-                DataType::Float16 => panic!("Float16 not yet implemented"),
-                DataType::Struct(_) => panic!("Reading struct arrays not implemented"),
-                DataType::Dictionary(_, _) => panic!("Reading dictionary arrays not implemented"),
-                DataType::Union(_, _) => panic!("Union not supported"),
-                DataType::Null => panic!("Null not supported"),
                 DataType::Decimal(_, _) => {
                     let data = ArrayData::try_new(
                         f.data_type().clone(),
-                        n.len(),
-                        Some(null_count),
+                        num_records,
+                        None,
                         Some(null_buffer),
                         0,
-                        vec![Buffer::from(b)],
+                        vec![b.into()],
                         vec![],
                     )
                     .unwrap();
                     arrays.push(make_array(data))
                 }
-                DataType::Map(_, _) => panic!("Map not supported"),
+                t => unreachable!("Encountered type {:?} which is not supported", t),
             }
         });
-    let batch = RecordBatch::try_new(Arc::new(schema.clone()), arrays).unwrap();
-    println!("Row count: {}", batch.num_rows());
-    Ok(batch)
+    Ok(RecordBatch::try_new(schema.clone(), arrays).unwrap())
 }
 
-fn read_col<R: Buf>(reader: &mut R, data_type: &DataType, length: usize) -> Result<Vec<u8>, ()> {
+fn read_col<R: Buf>(reader: &mut R, data_type: &DataType, length: usize) -> Result<Vec<u8>> {
     Ok(match data_type {
         DataType::Boolean => read_bool(reader),
         DataType::Int8 => read_i8(reader),
@@ -310,7 +365,6 @@ fn read_col<R: Buf>(reader: &mut R, data_type: &DataType, length: usize) -> Resu
         DataType::UInt16 => read_u16(reader),
         DataType::UInt32 => read_u32(reader),
         DataType::UInt64 => read_u64(reader),
-        DataType::Float16 => return Err(()),
         DataType::Float32 => read_f32(reader),
         DataType::Float64 => read_f64(reader),
         DataType::Timestamp(_, _) => read_timestamp64(reader),
@@ -323,17 +377,12 @@ fn read_col<R: Buf>(reader: &mut R, data_type: &DataType, length: usize) -> Resu
         DataType::Binary => read_string(reader, length), // TODO we'd need the length of the binary
         DataType::FixedSizeBinary(_) => read_string(reader, length),
         DataType::Utf8 => read_string(reader, length),
-        DataType::List(_) => return Err(()),
-        DataType::FixedSizeList(_, _) => return Err(()),
-        DataType::Struct(_) => return Err(()),
-        DataType::Dictionary(_, _) => return Err(()),
-        DataType::Union(_, _) => return Err(()),
-        DataType::Null => return Err(()),
-        DataType::LargeBinary => return Err(()),
-        DataType::LargeUtf8 => return Err(()),
-        DataType::LargeList(_) => return Err(()),
         DataType::Decimal(_, s) => read_decimal(reader, *s),
-        _ => return Err(()),
+        t => {
+            return Err(
+                RdbmsError::UnsupportedType(format!("The type {:?} is unsupported", t)).into(),
+            )
+        }
     })
 }
 
@@ -447,6 +496,7 @@ fn read_decimal<R: Buf>(reader: &mut R, target_scale: usize) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    use datafusion::arrow::util::pretty;
     use datafusion::catalog::catalog::CatalogProvider;
 
     use crate::sqldb::{postgres::PostgresConnection, ConnectionParameters};
@@ -460,18 +510,20 @@ mod tests {
         let catalog = pg_conn.load_catalog().await.unwrap();
         let table_provider = catalog.schema("public").unwrap().table("customer").unwrap();
         let schema = table_provider.schema();
-        let (mut client, connection) = pg_conn.connect().await.unwrap();
+        let (client, connection) = pg_conn.connect().await.unwrap();
         tokio::spawn(async move {
             if let Err(e) = connection.await {
                 eprintln!("Postgres onnection error: {}", e);
             }
         });
 
-        let query =
-            "select * from bench.public.customer where c_acctbal < -90 order by c_acctbal limit 2";
+        let query = "select * from bench.public.customer limit 2049 offset 10";
 
-        let reader = get_binary_reader(&mut client, query).await.unwrap();
-        let batch = read_from_binary(reader, &schema).await.unwrap();
-        dbg!(batch);
+        // let strm = read_from_query(&client, query, reader, schema).await;
+        // let batches = strm
+        //     .filter_map(|b| async move { b.ok() })
+        //     .collect::<Vec<_>>()
+        //     .await;
+        // pretty::print_batches(&batches).unwrap();
     }
 }

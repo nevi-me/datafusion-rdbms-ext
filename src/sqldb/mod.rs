@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::datatypes::Schema, error::DataFusionError, physical_plan::SendableRecordBatchStream,
+    arrow::{datatypes::SchemaRef, error::Result as ArrowResult, record_batch::RecordBatch},
+    error::DataFusionError,
 };
+use tokio::sync::mpsc::Sender;
 
 use self::postgres::PostgresConnection;
 
@@ -55,12 +57,17 @@ pub trait DatabaseConnection: Clone {
     async fn fetch_query(
         &self,
         query: &str,
-        schema: &Schema,
-    ) -> Result<SendableRecordBatchStream, DataFusionError>;
-    async fn fetch_table(
-        &self,
-        table_path: &str,
-        schema: &Schema,
-    ) -> Result<SendableRecordBatchStream, DataFusionError>;
+        schema: SchemaRef,
+        sender: Sender<ArrowResult<RecordBatch>>,
+    ) -> Result<(), DataFusionError>;
+    // async fn fetch_table(
+    //     &self,
+    //     table_path: &str,
+    //     schema: SchemaRef,
+    // ) -> Result<SendableRecordBatchStream, DataFusionError>;
+
     fn database_type(&self) -> DatabaseType;
+
+    /// Count the number of records to be returned, for partition purposes
+    async fn count_records(&self, query: &str) -> Result<Option<usize>, DataFusionError>;
 }
