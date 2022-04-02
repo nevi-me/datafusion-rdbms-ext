@@ -294,7 +294,9 @@ pub(super) async fn read_from_binary(
                 DataType::Map(_, _) => panic!("Map not supported"),
             }
         });
-    Ok(RecordBatch::try_new(Arc::new(schema.clone()), arrays).unwrap())
+    let batch = RecordBatch::try_new(Arc::new(schema.clone()), arrays).unwrap();
+    println!("Row count: {}", batch.num_rows());
+    Ok(batch)
 }
 
 fn read_col<R: Buf>(reader: &mut R, data_type: &DataType, length: usize) -> Result<Vec<u8>, ()> {

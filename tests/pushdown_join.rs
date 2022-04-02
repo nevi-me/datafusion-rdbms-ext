@@ -11,7 +11,7 @@ use datafusion_rdbms_ext::{
 
 #[tokio::test]
 async fn test_simple_join_pushdown() -> Result<()> {
-    let mut ctx = make_rdbms_context();
+    let ctx = make_rdbms_context();
 
     // Register catalog
     let connection = PostgresConnection::new(

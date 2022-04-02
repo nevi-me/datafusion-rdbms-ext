@@ -38,9 +38,9 @@ impl catalog::catalog::CatalogProvider for DatabaseCatalog {
         &self,
         name: &str,
         schema: Arc<dyn catalog::schema::SchemaProvider>,
-    ) -> Option<Arc<dyn catalog::schema::SchemaProvider>> {
+    ) -> Result<Option<Arc<dyn catalog::schema::SchemaProvider>>> {
         let mut schemas = self.schemas.write().unwrap();
-        schemas.insert(name.into(), schema)
+        Ok(schemas.insert(name.into(), schema))
     }
 }
 

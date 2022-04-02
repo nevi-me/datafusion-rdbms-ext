@@ -78,7 +78,7 @@ impl UserDefinedLogicalNode for SqlJoinPlanNode {
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         // TODO
-        write!(f, "SqlJoin: on={}", "TODO join columns")
+        write!(f, "SqlJoin: on=TODO join columns")
     }
 
     fn from_template(
@@ -91,7 +91,7 @@ impl UserDefinedLogicalNode for SqlJoinPlanNode {
         Arc::new(SqlJoinPlanNode {
             left_input: inputs[0].clone(),
             right_input: inputs[1].clone(),
-            join_type: self.join_type.clone(),
+            join_type: self.join_type,
             on: self.on.clone(),
             schema: self.schema.clone(),
         })

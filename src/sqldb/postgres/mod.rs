@@ -71,7 +71,7 @@ impl PostgresConnection {
     }
 
     pub async fn load_catalog(&self) -> Result<DatabaseCatalog, ()> {
-        let catalog = DatabaseCatalog::new(&self.database.as_str());
+        let catalog = DatabaseCatalog::new(self.database.as_str());
         let (client, connection) = self.connect().await?;
         tokio::spawn(async move {
             if let Err(e) = connection.await {
@@ -121,7 +121,7 @@ impl PostgresConnection {
             }
 
             // Register schema in the database catalog
-            catalog.register_schema(&schema, Arc::new(schema_catalog));
+            catalog.register_schema(&schema, Arc::new(schema_catalog)).unwrap();
         }
 
         Ok(catalog)
