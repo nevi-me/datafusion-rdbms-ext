@@ -10,7 +10,7 @@ use datafusion_rdbms_ext::{
 };
 
 #[tokio::test]
-async fn test_simple_join_pushdown() -> Result<()> {
+async fn test_aggregate_group1() -> Result<()> {
     let ctx = make_rdbms_context();
 
     // Register catalog
@@ -23,10 +23,24 @@ async fn test_simple_join_pushdown() -> Result<()> {
     ctx.register_catalog("bench", Arc::new(catalog));
 
     let query = r#"
-    select *
-    from bench.public.customer 
-    inner join bench.public.nation
-    on c_nationkey = n_nationkey
+    select
+        l_returnflag,
+        l_linestatus,
+        sum(l_quantity) as sum_qty,
+        sum(l_extendedprice) as sum_base_price,
+        sum(l_extendedprice * (1 - l_discount)) as sum_disc_price,
+        sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)) as sum_charge,
+        avg(l_quantity) as avg_qty,
+        avg(l_extendedprice) as avg_price,
+        avg(l_discount) as avg_disc,
+        count(*) as count_order
+    from
+        bench.public.lineitem
+    where
+        l_shipdate <= date '1998-09-02'
+    group by
+        l_returnflag,
+        l_linestatus
     "#;
 
     let df = ctx.sql(query).await.unwrap();

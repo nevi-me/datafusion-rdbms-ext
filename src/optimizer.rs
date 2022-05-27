@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use datafusion::{
-    datasource::datasource::TableSource,
+    datasource::datasource::Source,
     logical_plan::{
         plan::{Aggregate, Extension, Projection},
         LogicalPlan,
@@ -11,7 +11,7 @@ use datafusion::{
     optimizer::{optimizer::OptimizerRule, utils::optimize_children},
 };
 
-use crate::node::{SqlJoinPlanNode, SqlProjectAggregateNode};
+use crate::node::{SqlAstPlanNode, SqlJoinPlanNode, SqlProjectAggregateNode};
 
 /// A rule that optimizes joins from the same RDBMS source.
 /// Converts joins into a SQL query, so they can be computed at the source DB.
@@ -39,22 +39,20 @@ impl OptimizerRule for JoinOptimizerRule {
                     // Check if scans are from the same server, database and schema
                     // Some relational stores allow joining across databases, this is not yet supported
                     if let (
-                        TableSource::Relational {
+                        Source::Relational {
                             server: ref server_left,
                             database: Some(db_left),
                             schema: ref schema_left,
                             ..
                         },
-                        TableSource::Relational {
+                        Source::Relational {
                             server: ref server_right,
                             database: Some(db_right),
                             schema: ref schema_right,
                             ..
                         },
-                    ) = (
-                        left_scan.source.table_source(),
-                        right_scan.source.table_source(),
-                    ) {
+                    ) = (left_scan.source.source(), right_scan.source.source())
+                    {
                         if server_left.eq(server_right)
                             && db_left.eq(&db_right)
                             && schema_left.eq(schema_right)
@@ -84,22 +82,20 @@ impl OptimizerRule for JoinOptimizerRule {
                 // Check if scans are from the same server, database and schema
                 // Some relational stores allow joining across databases, this is not yet supported
                 if let (
-                    TableSource::Relational {
+                    Source::Relational {
                         server: ref server_left,
                         database: Some(db_left),
                         schema: ref schema_left,
                         ..
                     },
-                    TableSource::Relational {
+                    Source::Relational {
                         server: ref server_right,
                         database: Some(db_right),
                         schema: ref schema_right,
                         ..
                     },
-                ) = (
-                    left_scan.source.table_source(),
-                    right_scan.source.table_source(),
-                ) {
+                ) = (left_scan.source.source(), right_scan.source.source())
+                {
                     if server_left.eq(server_right)
                         && db_left.eq(&db_right)
                         && schema_left.eq(schema_right)
@@ -140,16 +136,16 @@ impl OptimizerRule for JoinOptimizerRule {
 /// A rule that optimizes a sequential Projection + Aggregate
 pub struct ProjectionAggregateOptimizerRule {}
 
-impl ProjectionAggregateOptimizerRule {
-    fn simplify(
-        &self,
-        proj1: &Projection,
-        proj2: &Projection,
-        agg: &Aggregate,
-    ) -> (Projection, Aggregate) {
-        panic!()
-    }
-}
+// impl ProjectionAggregateOptimizerRule {
+//     fn simplify(
+//         &self,
+//         proj1: &Projection,
+//         proj2: &Projection,
+//         agg: &Aggregate,
+//     ) -> (Projection, Aggregate) {
+//         panic!()
+//     }
+// }
 
 impl OptimizerRule for ProjectionAggregateOptimizerRule {
     fn optimize(
@@ -163,17 +159,21 @@ impl OptimizerRule for ProjectionAggregateOptimizerRule {
             if let LogicalPlan::Aggregate(aggregate) = &*projection.input {
                 if let LogicalPlan::TableScan(scan) = &*aggregate.input {
                     // Check that the table scan is a RDBMS scan
-                    if let TableSource::Relational { .. } = scan.source.table_source() {
-                        return Ok(LogicalPlan::Extension(Extension {
-                            node: Arc::new(SqlProjectAggregateNode {
-                                input: aggregate.input.as_ref().clone(),
-                                group_expr: aggregate.group_expr.clone(),
-                                aggr_expr: aggregate.aggr_expr.clone(),
-                                proj_expr: projection.expr.clone(),
-                                proj_alias: projection.alias.clone(),
-                                schema: plan.schema().clone(),
-                            }),
-                        }));
+                    if let Source::Relational { .. } = scan.source.source() {
+                        // Try to create an AST node
+                        let ast_node = SqlAstPlanNode::try_from_plan(plan);
+                        match ast_node {
+                            Ok(node) => {
+                                return Ok(LogicalPlan::Extension(Extension {
+                                    node: Arc::new(node),
+                                }))
+                            }
+                            Err(e) => {
+                                // write warning
+                                eprintln!("Error converting to AST node: {e}");
+                                return optimize_children(self, plan, execution_props);
+                            }
+                        }
                     }
                 }
             }
@@ -189,20 +189,21 @@ impl OptimizerRule for ProjectionAggregateOptimizerRule {
                 if let LogicalPlan::Projection(ref inner_projection) = &*aggregate.input {
                     if let LogicalPlan::TableScan(scan) = &*inner_projection.input {
                         // Check that the table scan is a RDBMS scan
-                        if let TableSource::Relational { .. } = scan.source.table_source() {
-                            // TODO: replace with an extension plan
-                            // dbg!(&projection.expr, &inner_projection.expr, &inner_projection.alias);
-                            return optimize_children(self, plan, execution_props);
-                            return Ok(LogicalPlan::Extension(Extension {
-                                node: Arc::new(SqlProjectAggregateNode {
-                                    input: aggregate.input.as_ref().clone(),
-                                    group_expr: aggregate.group_expr.clone(),
-                                    aggr_expr: aggregate.aggr_expr.clone(),
-                                    proj_expr: projection.expr.clone(),
-                                    proj_alias: projection.alias.clone(),
-                                    schema: plan.schema().clone(),
-                                }),
-                            }));
+                        if let Source::Relational { .. } = scan.source.source() {
+                            // Try to create an AST node
+                            let ast_node = SqlAstPlanNode::try_from_plan(plan);
+                            match ast_node {
+                                Ok(node) => {
+                                    return Ok(LogicalPlan::Extension(Extension {
+                                        node: Arc::new(node),
+                                    }))
+                                }
+                                Err(e) => {
+                                    // write warning
+                                    eprintln!("Error converting to AST node: {e}");
+                                    return optimize_children(self, plan, execution_props);
+                                }
+                            }
                         }
                     }
                 }

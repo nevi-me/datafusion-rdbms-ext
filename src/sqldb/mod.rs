@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
 use datafusion::{
-    arrow::{datatypes::SchemaRef, error::Result as ArrowResult, record_batch::RecordBatch},
-    error::DataFusionError,
+    arrow::datatypes::SchemaRef, error::DataFusionError, physical_plan::SendableRecordBatchStream,
 };
-use tokio::sync::mpsc::Sender;
 
 use self::postgres::PostgresConnection;
 
@@ -17,7 +15,7 @@ pub enum DatabaseType {
     MsSql,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 // TODO: implement a custom Debug that doesn't leak credentials
 pub struct ConnectionParameters {
     /// Let's say that we only take a connection string for now
@@ -32,7 +30,7 @@ impl ConnectionParameters {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DatabaseConnector {
     db_type: DatabaseType,
     params: ConnectionParameters,
@@ -54,13 +52,13 @@ impl DatabaseConnector {
 
 #[async_trait::async_trait]
 pub trait DatabaseConnection: Clone {
-    async fn fetch_query(
+    fn fetch_query(
         &self,
         query: &str,
         schema: SchemaRef,
-        sender: Sender<ArrowResult<RecordBatch>>,
-    ) -> Result<(), DataFusionError>;
-    // async fn fetch_table(
+        // sender: Sender<ArrowResult<RecordBatch>>,
+    ) -> Result<SendableRecordBatchStream, DataFusionError>;
+    // fn fetch_table(
     //     &self,
     //     table_path: &str,
     //     schema: SchemaRef,

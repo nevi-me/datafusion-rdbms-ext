@@ -6,7 +6,7 @@ use std::sync::Arc;
 use datafusion::{
     arrow::{datatypes::SchemaRef, error::Result as ArrowResult, record_batch::RecordBatch},
     datasource::{
-        datasource::TableProviderFilterPushDown as FPD, datasource::TableSource, TableProvider,
+        datasource::Source, datasource::TableProviderFilterPushDown as FPD, TableProvider,
         TableType,
     },
     error::{DataFusionError, Result as DfResult},
@@ -14,6 +14,7 @@ use datafusion::{
     logical_plan::Expr,
     physical_plan::ExecutionPlan,
 };
+use log::debug;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -71,8 +72,8 @@ impl TableProvider for PostgresTableProvider {
         self.table_type
     }
 
-    fn table_source(&self) -> TableSource {
-        TableSource::Relational {
+    fn source(&self) -> Source {
+        Source::Relational {
             server: None, // TODO should parse it from connection string
             database: Some(self.connection.database.to_string()),
             schema: Some(self.schema_name.clone()),
@@ -144,7 +145,7 @@ impl TableProvider for PostgresTableProvider {
                         limit = records_per_partition,
                         offset = offset
                     );
-                        println!("Partitioned query: {query}");
+                        debug!("Partitioned query: {query}");
                         QueryPartition {
                             connection: self.connection.clone(),
                             query,
@@ -206,11 +207,11 @@ impl ExecutionPlan for PostgresExec {
     }
 
     fn with_new_children(
-        &self,
+        self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         if children.is_empty() {
-            Ok(Arc::new(self.clone()))
+            Ok(self.clone())
         } else {
             Err(DataFusionError::Internal(format!(
                 "Children cannot be replaced in {:?}",
@@ -219,7 +220,7 @@ impl ExecutionPlan for PostgresExec {
         }
     }
 
-    async fn execute(
+    fn execute(
         &self,
         partition: usize,
         _context: Arc<TaskContext>,
@@ -235,14 +236,9 @@ impl ExecutionPlan for PostgresExec {
         let query = partition.query.clone();
         let schema = self.schema();
 
-        connection
-            .fetch_query(&query, schema.clone(), response_tx)
-            .await?;
+        let stream = connection.fetch_query(&query, schema.clone())?;
 
-        Ok(Box::pin(DatabaseStream {
-            schema: self.schema(),
-            inner: ReceiverStream::new(response_rx),
-        }))
+        Ok(stream)
     }
 
     fn statistics(&self) -> datafusion::physical_plan::Statistics {
@@ -301,5 +297,13 @@ fn supports_filter_pushdown(filter: &Expr) -> FPD {
         Expr::InList { .. } => FPD::Exact,
         Expr::Wildcard => FPD::Unsupported,
         Expr::QualifiedWildcard { .. } => FPD::Unsupported,
+        Expr::Exists { subquery, negated } => todo!(),
+        Expr::InSubquery {
+            expr,
+            subquery,
+            negated,
+        } => todo!(),
+        Expr::ScalarSubquery(_) => todo!(),
+        Expr::GroupingSet(_) => todo!(),
     }
 }

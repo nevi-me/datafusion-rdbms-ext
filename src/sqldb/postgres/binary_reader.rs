@@ -8,6 +8,7 @@ use datafusion::arrow::error::Result as ArrowResult;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::{DataFusionError, Result};
 use futures_util::StreamExt;
+use log::debug;
 use tokio::sync::mpsc::Sender;
 use tokio_postgres::Client;
 
@@ -166,7 +167,6 @@ pub async fn read_from_query<'a>(
             buffers = (0..field_len)
                 .map(|_| MutableBuffer::new(batch_size))
                 .collect();
-            // println!("Yielding completed batch with {record_num} records");
             // Reset records
             record_num = 0;
             sender.send(Ok(batch)).await.unwrap();
@@ -193,7 +193,6 @@ pub async fn read_from_query<'a>(
     // Last batch
     let num_records = record_num as usize;
     if num_records > 0 {
-        // println!("Yielding incomplete batch with {num_records} records");
         let batch = complete_batch(
             buffers.drain(0..),
             &mut null_buffers,
@@ -201,7 +200,9 @@ pub async fn read_from_query<'a>(
             num_records,
             schema.clone(),
         )?;
+        let records = batch.num_rows();
         sender.send(Ok(batch)).await.unwrap();
+        debug!("Sent {} records", records);
     }
 
     Ok(())

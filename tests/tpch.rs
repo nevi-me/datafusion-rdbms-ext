@@ -27,7 +27,7 @@ async fn prepare_context() -> SessionContext {
 
 async fn run_query(ctx: &mut SessionContext, query: &str) {
     let df = ctx.sql(query).await.unwrap();
-    let plan = df.to_logical_plan();
+    let plan = df.to_logical_plan().unwrap();
     let optimized_plan = ctx.optimize(&plan).unwrap();
 
     println!("Logical plan:\n\n {:?}", plan);

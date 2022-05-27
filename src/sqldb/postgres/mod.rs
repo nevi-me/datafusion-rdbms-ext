@@ -1,11 +1,11 @@
 use std::{collections::HashMap, sync::Arc};
 
 use datafusion::{
-    arrow::{datatypes::SchemaRef, error::Result as ArrowResult, record_batch::RecordBatch},
+    arrow::datatypes::SchemaRef,
     catalog::{catalog::CatalogProvider, schema::SchemaProvider},
     error::DataFusionError,
+    physical_plan::{stream::RecordBatchReceiverStream, SendableRecordBatchStream},
 };
-use tokio::sync::mpsc::Sender;
 use tokio_postgres::{tls::NoTlsStream, Client, Connection, NoTls, Socket};
 
 use crate::catalog::{DatabaseCatalog, SchemaCatalog};
@@ -130,21 +130,41 @@ impl DatabaseConnection for PostgresConnection {
         DatabaseType::Postgres
     }
 
-    async fn fetch_query(
+    fn fetch_query(
         &self,
         query: &str,
         schema: SchemaRef,
-        sender: Sender<ArrowResult<RecordBatch>>,
-    ) -> Result<(), DataFusionError> {
+        // sender: Sender<ArrowResult<RecordBatch>>,
+    ) -> Result<SendableRecordBatchStream, DataFusionError> {
         // Connect to database
-        let (client, connection) = self.connect().await.unwrap();
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("Postgres onnection error: {}", e);
-            }
-        });
+        let connection = self.clone();
+        let query = query.to_string();
 
-        read_from_query(&client, query, schema.clone(), sender).await
+        // Use spawn_blocking only if running from a tokio context (#2201)
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let (response_tx, response_rx) = tokio::sync::mpsc::channel(2);
+                let schema_copy = schema.clone();
+                let join_handle = handle.spawn(async move {
+                    let (client, connection) = connection.connect().await.unwrap();
+                    tokio::spawn(async move {
+                        if let Err(e) = connection.await {
+                            eprintln!("Postgres onnection error: {}", e);
+                        }
+                    });
+
+                    read_from_query(&client, &query, schema_copy, response_tx)
+                        .await
+                        .unwrap();
+                });
+                Ok(RecordBatchReceiverStream::create(
+                    &schema,
+                    response_rx,
+                    join_handle,
+                ))
+            }
+            Err(_) => panic!("Not sure of what to do"),
+        }
     }
 
     async fn count_records(&self, query: &str) -> Result<Option<usize>, DataFusionError> {

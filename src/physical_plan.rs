@@ -67,24 +67,12 @@ impl ExecutionPlan for DatabaseExec {
         vec![]
     }
 
-    fn with_new_children(
-        &self,
-        children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        match children.len() {
-            0 => Ok(Arc::new(self.clone())),
-            _ => Err(DFError::Internal(
-                "Children cannot be replaced in DatabaseExec".to_string(),
-            )),
-        }
-    }
-
     fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
         None
     }
 
     /// Execute one partition and return an iterator over RecordBatch
-    async fn execute(
+    fn execute(
         &self,
         partition: usize,
         context: Arc<TaskContext>,
@@ -99,15 +87,9 @@ impl ExecutionPlan for DatabaseExec {
         let schema = self.schema();
 
         let reader = connector.into_connection();
-        reader
-            .fetch_query(&query, schema.clone(), response_tx)
-            .await
-            .unwrap();
+        let stream = reader.fetch_query(&query, schema.clone()).unwrap();
 
-        Ok(Box::pin(DatabaseStream {
-            schema: self.schema(),
-            inner: ReceiverStream::new(response_rx),
-        }))
+        Ok(stream)
     }
 
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -141,6 +123,18 @@ impl ExecutionPlan for DatabaseExec {
 
     fn metrics(&self) -> Option<datafusion::physical_plan::metrics::MetricsSet> {
         None
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        match children.len() {
+            0 => Ok(self.clone()),
+            _ => Err(DFError::Internal(
+                "Children cannot be replaced in DatabaseExec".to_string(),
+            )),
+        }
     }
 }
 
@@ -201,7 +195,25 @@ impl ExtensionPlanner for SqlDatabaseQueryPlanner {
     ) -> DFResult<Option<Arc<dyn ExecutionPlan>>> {
         // Check the custom nodes
         Ok(
-            if let Some(join_node) = node.as_any().downcast_ref::<SqlJoinPlanNode>() {
+            if let Some(node) = node.as_any().downcast_ref::<SqlAstPlanNode>() {
+                let query = node.ast.to_string();
+                dbg!(&query);
+
+                let schema = Schema::new_with_metadata(
+                    node.schema()
+                        .fields()
+                        .iter()
+                        .map(|f| f.field().clone())
+                        .collect(),
+                    node.schema().metadata().clone(),
+                );
+
+                Some(Arc::new(DatabaseExec {
+                    connector: node.connector.clone(),
+                    query,
+                    schema: Arc::new(schema),
+                }))
+            } else if let Some(join_node) = node.as_any().downcast_ref::<SqlJoinPlanNode>() {
                 assert_eq!(logical_inputs.len(), 2, "input size inconsistent");
                 assert_eq!(physical_inputs.len(), 2, "input size inconsistent");
                 // Extract connectino from any of the logical inputs
