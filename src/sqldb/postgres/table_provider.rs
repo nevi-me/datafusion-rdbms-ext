@@ -1,27 +1,23 @@
 //! An implementation of the DataFusion TableProvider for Postgres.
 //! Supports filter and projection pushdown.
 
-use std::sync::Arc;
+use std::{any::Any, sync::Arc};
 
 use datafusion::{
-    arrow::{datatypes::SchemaRef, error::Result as ArrowResult, record_batch::RecordBatch},
+    arrow::datatypes::SchemaRef,
     datasource::{
         datasource::Source, datasource::TableProviderFilterPushDown as FPD, TableProvider,
         TableType,
     },
     error::{DataFusionError, Result as DfResult},
     execution::context::TaskContext,
-    logical_plan::Expr,
+    logical_expr::TableSource,
+    logical_plan::{plan::DefaultTableSource, Expr},
     physical_plan::ExecutionPlan,
 };
 use log::debug;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tokio_stream::wrappers::ReceiverStream;
 
-use crate::{
-    parser::{expr_to_sql, DatabaseDialect},
-    physical_plan::DatabaseStream,
-};
+use crate::parser::{expr_to_sql, DatabaseDialect};
 
 use crate::sqldb::DatabaseConnection;
 
@@ -60,7 +56,7 @@ impl PostgresTableProvider {
 
 #[async_trait::async_trait]
 impl TableProvider for PostgresTableProvider {
-    fn as_any(&self) -> &dyn std::any::Any {
+    fn as_any(&self) -> &dyn Any {
         self
     }
 
@@ -211,7 +207,7 @@ impl ExecutionPlan for PostgresExec {
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         if children.is_empty() {
-            Ok(self.clone())
+            Ok(self)
         } else {
             Err(DataFusionError::Internal(format!(
                 "Children cannot be replaced in {:?}",
@@ -225,18 +221,13 @@ impl ExecutionPlan for PostgresExec {
         partition: usize,
         _context: Arc<TaskContext>,
     ) -> DfResult<datafusion::physical_plan::SendableRecordBatchStream> {
-        let (response_tx, response_rx): (
-            Sender<ArrowResult<RecordBatch>>,
-            Receiver<ArrowResult<RecordBatch>>,
-        ) = channel(2000);
-
         let partition = self.partitions.get(partition).unwrap();
 
         let connection = partition.connection.clone();
         let query = partition.query.clone();
         let schema = self.schema();
 
-        let stream = connection.fetch_query(&query, schema.clone())?;
+        let stream = connection.fetch_query(&query, schema)?;
 
         Ok(stream)
     }
@@ -297,12 +288,8 @@ fn supports_filter_pushdown(filter: &Expr) -> FPD {
         Expr::InList { .. } => FPD::Exact,
         Expr::Wildcard => FPD::Unsupported,
         Expr::QualifiedWildcard { .. } => FPD::Unsupported,
-        Expr::Exists { subquery, negated } => todo!(),
-        Expr::InSubquery {
-            expr,
-            subquery,
-            negated,
-        } => todo!(),
+        Expr::Exists { .. } => todo!(),
+        Expr::InSubquery { .. } => todo!(),
         Expr::ScalarSubquery(_) => todo!(),
         Expr::GroupingSet(_) => todo!(),
     }

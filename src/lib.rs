@@ -24,8 +24,9 @@ pub fn make_rdbms_context() -> SessionContext {
         Arc::new(RuntimeEnv::new(RuntimeConfig::default()).unwrap()),
     )
     .with_query_planner(Arc::new(SqlDatabaseQueryPlanner {}))
-    // .add_optimizer_rule(Arc::new(JoinOptimizerRule {}))
-    .add_optimizer_rule(Arc::new(ProjectionAggregateOptimizerRule {}));
+    .add_optimizer_rule(Arc::new(QueryPushdownOptimizerRule {}))
+    // .add_optimizer_rule(Arc::new(ProjectionAggregateOptimizerRule {}))
+    ;
 
     SessionContext::with_state(state)
 }

@@ -4,148 +4,13 @@ use std::sync::Arc;
 
 use datafusion::{
     datasource::datasource::Source,
-    logical_plan::{
-        plan::{Aggregate, Extension, Projection},
-        LogicalPlan,
-    },
+    logical_plan::{plan::Extension, LogicalPlan},
     optimizer::{optimizer::OptimizerRule, utils::optimize_children},
 };
 
-use crate::node::{SqlAstPlanNode, SqlJoinPlanNode, SqlProjectAggregateNode};
-
-/// A rule that optimizes joins from the same RDBMS source.
-/// Converts joins into a SQL query, so they can be computed at the source DB.
-pub struct JoinOptimizerRule {}
-impl OptimizerRule for JoinOptimizerRule {
-    fn optimize(
-        &self,
-        plan: &LogicalPlan,
-        execution_props: &datafusion::execution::context::ExecutionProps,
-    ) -> datafusion::error::Result<datafusion::logical_plan::LogicalPlan> {
-        // Searches for a Join logical plan, and tries to merge the joins into a single
-        // query if:
-        // - the joins are from table scans from the same catalog and schema
-        // - the other plans between the joins are supported by the source
-        //
-        // e.g. select a.*, b.col as b_col from a inner join b on a.col = b.col
-        //
-        // The expected plan for the above is a Join { TableScan, TableScan, InnerJoin }
-        // and would be written as JoinedTableScan { a, b, InnerJoin }
-        if let LogicalPlan::Projection(project) = plan {
-            if let LogicalPlan::Join(join) = &*project.input {
-                if let (LogicalPlan::TableScan(left_scan), LogicalPlan::TableScan(right_scan)) =
-                    (join.left.as_ref(), join.right.as_ref())
-                {
-                    // Check if scans are from the same server, database and schema
-                    // Some relational stores allow joining across databases, this is not yet supported
-                    if let (
-                        Source::Relational {
-                            server: ref server_left,
-                            database: Some(db_left),
-                            schema: ref schema_left,
-                            ..
-                        },
-                        Source::Relational {
-                            server: ref server_right,
-                            database: Some(db_right),
-                            schema: ref schema_right,
-                            ..
-                        },
-                    ) = (left_scan.source.source(), right_scan.source.source())
-                    {
-                        if server_left.eq(server_right)
-                            && db_left.eq(&db_right)
-                            && schema_left.eq(schema_right)
-                        {
-                            let left_input = self.optimize(&join.left, execution_props)?;
-                            let right_input = self.optimize(&join.right, execution_props)?;
-                            // dbg!(plan.schema().fields().len(), project.schema.fields().len(), left_input.schema().fields().len(), right_input.schema().fields().len());
-                            return Ok(LogicalPlan::Extension(Extension {
-                                node: Arc::new(SqlJoinPlanNode {
-                                    left_input,
-                                    right_input,
-                                    join_type: join.join_type,
-                                    on: join.on.clone(),
-                                    schema: plan.schema().clone(),
-                                }),
-                            }));
-                        }
-                    }
-                }
-            }
-        }
-
-        if let LogicalPlan::Join(join) = plan {
-            if let (LogicalPlan::TableScan(left_scan), LogicalPlan::TableScan(right_scan)) =
-                (join.left.as_ref(), join.right.as_ref())
-            {
-                // Check if scans are from the same server, database and schema
-                // Some relational stores allow joining across databases, this is not yet supported
-                if let (
-                    Source::Relational {
-                        server: ref server_left,
-                        database: Some(db_left),
-                        schema: ref schema_left,
-                        ..
-                    },
-                    Source::Relational {
-                        server: ref server_right,
-                        database: Some(db_right),
-                        schema: ref schema_right,
-                        ..
-                    },
-                ) = (left_scan.source.source(), right_scan.source.source())
-                {
-                    if server_left.eq(server_right)
-                        && db_left.eq(&db_right)
-                        && schema_left.eq(schema_right)
-                    {
-                        let left_input = self.optimize(&join.left, execution_props)?;
-                        let right_input = self.optimize(&join.right, execution_props)?;
-
-                        // NOTE there is currently an issue here with some projections.
-                        // If a SQL query projects with a join, the upstream optimizer reinserts
-                        // the columns that have been removed by the projection optimizer, causing
-                        // the query to fail due to mismatched schemas.
-                        // I've opened a vague issue about it so we can track it there.
-                        // https://github.com/nevi-me/datafusion-rdbms-ext/issues/5
-                        return Ok(LogicalPlan::Extension(Extension {
-                            node: Arc::new(SqlJoinPlanNode {
-                                left_input,
-                                right_input,
-                                join_type: join.join_type,
-                                on: join.on.clone(),
-                                schema: plan.schema().clone(),
-                            }),
-                        }));
-                    }
-                }
-            }
-        }
-
-        // If we didn't find the Limit/Sort combination, recurse as
-        // normal and build the result.
-        optimize_children(self, plan, execution_props)
-    }
-
-    fn name(&self) -> &str {
-        "sql_join"
-    }
-}
-
+use crate::node::{SqlAstPlanNode};
 /// A rule that optimizes a sequential Projection + Aggregate
 pub struct ProjectionAggregateOptimizerRule {}
-
-// impl ProjectionAggregateOptimizerRule {
-//     fn simplify(
-//         &self,
-//         proj1: &Projection,
-//         proj2: &Projection,
-//         agg: &Aggregate,
-//     ) -> (Projection, Aggregate) {
-//         panic!()
-//     }
-// }
 
 impl OptimizerRule for ProjectionAggregateOptimizerRule {
     fn optimize(
@@ -229,54 +94,6 @@ impl OptimizerRule for CrossJoinFilterRule {
         plan: &LogicalPlan,
         execution_props: &datafusion::execution::context::ExecutionProps,
     ) -> datafusion::error::Result<LogicalPlan> {
-        // Look for Aggregate > Projection > TableScan (or supported extension)
-        // Projection + Aggregate can sometimes be a (re)naming of an aggregate calculation
-        // if let LogicalPlan::Filter(ref filter) = plan {
-        //     if let LogicalPlan::CrossJoin(join) = &*filter.input {
-        //         if let (LogicalPlan::TableScan(left_scan), LogicalPlan::TableScan(right_scan)) =
-        //             (join.left.as_ref(), join.right.as_ref())
-        //         {
-        //             // Check if scans are from the same server, database and schema
-        //             // Some relational stores allow joining across databases, this is not yet supported
-        //             if let (
-        //                 TableSource::Relational {
-        //                     server: ref server_left,
-        //                     database: Some(db_left),
-        //                     schema: ref schema_left,
-        //                     ..
-        //                 },
-        //                 TableSource::Relational {
-        //                     server: ref server_right,
-        //                     database: Some(db_right),
-        //                     schema: ref schema_right,
-        //                     ..
-        //                 },
-        //             ) = (
-        //                 left_scan.source.table_source(),
-        //                 right_scan.source.table_source(),
-        //             ) {
-        //                 if server_left.eq(&server_right)
-        //                     && db_left.eq(&db_right)
-        //                     && schema_left.eq(schema_right)
-        //                 {
-        //                     // check the expressions
-        //                     dbg!(&filter.predicate);
-        //                     let left_input = self.optimize(&join.left, execution_props)?;
-        //                     let right_input = self.optimize(&join.right, execution_props)?;
-        //                     return Ok(LogicalPlan::Extension(Extension {
-        //                         node: Arc::new(SqlJoinPlanNode {
-        //                             left_input,
-        //                             right_input,
-        //                             join_type: datafusion::logical_plan::JoinType::Inner,
-        //                             on: vec![],
-        //                             schema: join.schema.clone(),
-        //                         }),
-        //                     }));
-        //                 }
-        //             }
-        //         }
-        //     }
-        // }
 
         // If we didn't find the Limit/Sort combination, recurse as
         // normal and build the result.
@@ -285,5 +102,34 @@ impl OptimizerRule for CrossJoinFilterRule {
 
     fn name(&self) -> &str {
         "sql_project_aggregate"
+    }
+}
+
+/// A general pushdown optimizer that converts as much of the logical plan
+/// to an AST that is pushed to the database.
+pub struct QueryPushdownOptimizerRule {}
+
+impl OptimizerRule for QueryPushdownOptimizerRule {
+    fn optimize(
+        &self,
+        plan: &LogicalPlan,
+        execution_props: &datafusion::execution::context::ExecutionProps,
+    ) -> datafusion::common::Result<LogicalPlan> {
+        // Try to create an AST node
+        let ast_node = SqlAstPlanNode::try_from_plan(plan);
+        match ast_node {
+            Ok(node) => Ok(LogicalPlan::Extension(Extension {
+                node: Arc::new(node),
+            })),
+            Err(e) => {
+                // write warning
+                eprintln!("Error converting to AST node: {e}");
+                optimize_children(self, plan, execution_props)
+            }
+        }
+    }
+
+    fn name(&self) -> &str {
+        "sql_query_pushdown"
     }
 }

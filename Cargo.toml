@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 # Currently depends on some minor changes to DataFusion (TableSource)
 datafusion = { git = "https://github.com/apache/arrow-datafusion", branch = "rdbms-changes", features = ["jit"] }
-sqlparser = "0.15.0"
+sqlparser = "0.17.0"
 async-trait = "0.1"
 futures-util = "0.3"
 # TODO: create separate features for sources, link them to DB dialects
@@ -16,9 +16,11 @@ tokio-postgres = "0.7"
 tokio = { version = "1", features = ["macros"] }
 tokio-stream = "0.1"
 bytes = "1"
+log = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros"] }
+env_logger = "0.9"
 
 [profile.dev]
 # Run tests with some optimization to speed them up

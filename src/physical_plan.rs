@@ -87,7 +87,7 @@ impl ExecutionPlan for DatabaseExec {
         let schema = self.schema();
 
         let reader = connector.into_connection();
-        let stream = reader.fetch_query(&query, schema.clone()).unwrap();
+        let stream = reader.fetch_query(&query, schema).unwrap();
 
         Ok(stream)
     }
@@ -130,7 +130,7 @@ impl ExecutionPlan for DatabaseExec {
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
         match children.len() {
-            0 => Ok(self.clone()),
+            0 => Ok(self),
             _ => Err(DFError::Internal(
                 "Children cannot be replaced in DatabaseExec".to_string(),
             )),
@@ -196,6 +196,7 @@ impl ExtensionPlanner for SqlDatabaseQueryPlanner {
         // Check the custom nodes
         Ok(
             if let Some(node) = node.as_any().downcast_ref::<SqlAstPlanNode>() {
+                dbg!(&node.ast);
                 let query = node.ast.to_string();
                 dbg!(&query);
 
@@ -211,34 +212,6 @@ impl ExtensionPlanner for SqlDatabaseQueryPlanner {
                 Some(Arc::new(DatabaseExec {
                     connector: node.connector.clone(),
                     query,
-                    schema: Arc::new(schema),
-                }))
-            } else if let Some(join_node) = node.as_any().downcast_ref::<SqlJoinPlanNode>() {
-                assert_eq!(logical_inputs.len(), 2, "input size inconsistent");
-                assert_eq!(physical_inputs.len(), 2, "input size inconsistent");
-                // Extract connectino from any of the logical inputs
-                let input1 = logical_inputs[0];
-                let connector = if let LogicalPlan::TableScan(TableScan { ref source, .. }) = input1
-                {
-                    // TODO check which type to cast to
-                    let source = source
-                        .as_any()
-                        .downcast_ref::<PostgresTableProvider>()
-                        .unwrap();
-                    source.connection().to_connector()
-                } else {
-                    return Ok(None);
-                };
-                // let schema = Arc::new(join_node.schema.as_ref().into());
-                let left_schema = physical_inputs[0].schema();
-                let right_schema = physical_inputs[1].schema();
-                let schema = Schema::try_merge(vec![
-                    left_schema.as_ref().clone(),
-                    right_schema.as_ref().clone(),
-                ])?;
-                Some(Arc::new(DatabaseExec {
-                    connector,
-                    query: join_node.to_sql()?,
                     schema: Arc::new(schema),
                 }))
             } else if let Some(node) = node.as_any().downcast_ref::<SqlProjectAggregateNode>() {
