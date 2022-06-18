@@ -1,11 +1,11 @@
 select
-    bench.public.nation,
+    nation,
     o_year,
     sum(amount) as sum_profit
 from
     (
         select
-            n_name as bench.public.nation,
+            n_name as nation,
             extract(year from o_orderdate) as o_year,
             l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity as amount
         from
@@ -25,8 +25,8 @@ from
           and p_name like '%green%'
     ) as profit
 group by
-    bench.public.nation,
+    nation,
     o_year
 order by
-    bench.public.nation,
+    nation,
     o_year desc;
