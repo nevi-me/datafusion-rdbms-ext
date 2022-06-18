@@ -54,7 +54,9 @@ Here is a list of the queries, that shows which tests pass, or what is missing.
 - [ ] Q4
   - Error: `Execution("DateIntervalExpr does not support IntervalYearMonth")`
 - [X] Q5
-- [x] Q6
+- [-] Q6
+  - [x] Passes
+  - [ ] Accurate result
 - [ ] Q7
 - [ ] Q8
   - Query parser error
@@ -64,6 +66,7 @@ Here is a list of the queries, that shows which tests pass, or what is missing.
   - [X] Passes
   - [ ] Accurate result
 - [ ] Q11
+   - Physical plan does not support logical expression subquery
 - [ ] Q12
 - [ ] Q13
 - [ ] Q14
@@ -75,15 +78,15 @@ Here is a list of the queries, that shows which tests pass, or what is missing.
 - [ ] Q17
   - `ScalarSubquery` not supported in `expr_to_sql`
 - [ ] Q18
-  - `300L` in query
+  - `group by x having y` is not parsed correctly
 - [ ] Q19
   - DF creates a cross join, not yet supported in parser
   - `ScalarSubquery` not supported in `expr_to_sql`
 - [ ] Q20
+   - Physical plan does not support logical expression subquery
 - [ ] Q21
   - Requires `Expr::Exists` to be supported by physical planner (should be possible to bypass this)
 - [ ] Q22
-  - `Uint64(n)` converted to `nL`
 
 
 ## Counter-Points

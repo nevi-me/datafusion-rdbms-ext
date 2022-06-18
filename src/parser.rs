@@ -108,7 +108,8 @@ pub fn logical_plan_to_ast(
                         }
 
                         // Extract connection
-                        let connector = if let TableScan { ref source, .. } = scan {
+                        let TableScan { ref source, .. } = scan;
+                        let connector = {
                             // TODO check which type to cast to
                             let source = source
                                 .as_any()
@@ -120,8 +121,6 @@ pub fn logical_plan_to_ast(
                                 .downcast_ref::<PostgresTableProvider>()
                                 .unwrap();
                             source.connection().to_connector()
-                        } else {
-                            panic!();
                         };
                         let query = Query {
                             with: None,
@@ -135,7 +134,7 @@ pub fn logical_plan_to_ast(
                                         // If expr is alias, use its aliased expr
                                         match e {
                                             InExpr::Alias(ex, alias) => {
-                                                let key = ex.to_string().replace("#", "");
+                                                let key = ex.to_string().replace('#', "");
                                                 println!(
                                                     "Aliased expr: {key}, e: {}",
                                                     e.to_string().replace("#", "")
@@ -256,7 +255,11 @@ pub fn logical_plan_to_ast(
                 SetExpr::Select(select) => {
                     select.selection = Some(expr_to_ast(&filter.predicate, dialect))
                 }
-                _ => panic!(),
+                _ => {
+                    return Err(RdbmsError::UnsupportedQuery(
+                        "Filter not fully supported".to_string(),
+                    ))
+                }
             }
             return Ok((query, connector));
         }
@@ -283,7 +286,9 @@ pub fn logical_plan_to_ast(
                 SetExpr::Query(query) => {
                     println!("Query: {:#?}", query);
                     println!("Query string: {query}");
-                    todo!()
+                    return Err(RdbmsError::UnsupportedQuery(
+                        "Aggregates are not fully supported".to_string(),
+                    ));
                 }
                 SetExpr::SetOperation { .. } => todo!(),
                 SetExpr::Values(_) => todo!(),
@@ -361,7 +366,50 @@ pub fn logical_plan_to_ast(
                 connector,
             )
         }
-        LogicalPlan::CrossJoin(_) => todo!(),
+        LogicalPlan::CrossJoin(cross_join) => {
+            let (mut left, connector) = logical_plan_to_ast(&cross_join.left, dialect)?;
+            let (right, _) = logical_plan_to_ast(&cross_join.right, dialect)?;
+            let body = match (left.body.borrow_mut(), right.body) {
+                (SetExpr::Select(left_select), SetExpr::Select(right_select)) => {
+                    let mut from = left_select.from[0].clone();
+                    from.joins.push(Join {
+                        relation: right_select.from[0].clone().relation,
+                        join_operator: sqlparser::ast::JoinOperator::CrossJoin,
+                    });
+                    left_select.from[0] = from;
+                    // Add columns from right
+                    // TODO: this could be simplified to a Wildcard
+                    left_select
+                        .projection
+                        .extend_from_slice(&right_select.projection);
+                    left_select.clone()
+                }
+                // SetExpr::Query(_) => todo!(),
+                // SetExpr::SetOperation {
+                //     op,
+                //     all,
+                //     left,
+                //     right,
+                // } => todo!(),
+                // SetExpr::Values(_) => todo!(),
+                // SetExpr::Insert(_) => todo!(),
+                _ => {
+                    todo!("non-select joins not implemented")
+                }
+            };
+            (
+                Query {
+                    with: None,
+                    body: SetExpr::Select(body),
+                    order_by: vec![],
+                    limit: None,
+                    offset: None,
+                    fetch: None,
+                    lock: None,
+                },
+                connector,
+            )
+        }
         LogicalPlan::Repartition(_) => todo!(),
         LogicalPlan::Union(_) => todo!(),
         LogicalPlan::TableScan(scan) => {
@@ -405,11 +453,13 @@ pub fn logical_plan_to_ast(
                     })
                     .collect()
             };
-            let selection = if scan.filters.is_empty() {
+            // TODO: complete the selection
+            let selection: Option<()> = if scan.filters.is_empty() {
                 None
             } else {
                 let mut filter_iter = scan.filters.iter();
-                Some(scan.filters.iter().map(|filter| {}))
+                Some(scan.filters.iter().map(|filter| {}));
+                todo!();
             };
             (
                 Query {
@@ -654,9 +704,10 @@ fn expr_to_ast(expr: &Expr, dialect: DatabaseDialect) -> sqlparser::ast::Expr {
                 right: Box::new(expr_to_ast(right, dialect)),
             }
         }
-        Expr::Not(expr) => {
-            todo!("NOT {}", expr_to_sql(expr, dialect))
-        }
+        Expr::Not(expr) => OutExpr::UnaryOp {
+            op: UnaryOperator::Not,
+            expr: Box::new(expr_to_ast(expr, dialect)),
+        },
         Expr::IsNotNull(expr) => OutExpr::IsNotNull(Box::new(expr_to_ast(expr, dialect))),
         Expr::IsNull(expr) => OutExpr::IsNull(Box::new(expr_to_ast(expr, dialect))),
         Expr::Negative(expr) => {
@@ -866,15 +917,13 @@ fn expr_to_ast(expr: &Expr, dialect: DatabaseDialect) -> sqlparser::ast::Expr {
         } => {
             let list = list
                 .iter()
-                .map(|expr| expr_to_sql(expr, dialect))
-                .collect::<Vec<_>>()
-                .join(", ");
-            todo!(
-                "{} {}({})",
-                expr_to_sql(expr, dialect),
-                if *negated { "NOT IN " } else { "IN" },
-                list
-            )
+                .map(|expr| expr_to_ast(expr, dialect))
+                .collect::<Vec<_>>();
+            OutExpr::InList {
+                expr: Box::new(expr_to_ast(expr, dialect)),
+                list,
+                negated: *negated,
+            }
         }
         Expr::Wildcard => todo!(),
         Expr::QualifiedWildcard { .. } => todo!(),
@@ -1054,13 +1103,9 @@ pub fn expr_to_sql(expr: &Expr, _dialect: DatabaseDialect) -> String {
         }
         Expr::Wildcard => todo!(),
         Expr::QualifiedWildcard { .. } => todo!(),
-        Expr::Exists { subquery, negated } => todo!(),
-        Expr::InSubquery {
-            expr,
-            subquery,
-            negated,
-        } => todo!(),
-        Expr::ScalarSubquery(subquery) => {
+        Expr::Exists { .. } => todo!(),
+        Expr::InSubquery { .. } => todo!(),
+        Expr::ScalarSubquery(..) => {
             todo!()
         }
         Expr::GroupingSet(_) => todo!(),
@@ -1078,33 +1123,20 @@ fn expr_inner_name(expr: &Expr) -> String {
             dbg!(op);
             dbg!(right);
 
-            return String::from("UNKNOWN ");
+            panic!();
         }
         Expr::Not(_) => todo!(),
         Expr::IsNotNull(_) => todo!(),
         Expr::IsNull(_) => todo!(),
         Expr::Negative(_) => todo!(),
-        Expr::GetIndexedField { expr, key } => todo!(),
-        Expr::Between {
-            expr,
-            negated,
-            low,
-            high,
-        } => todo!(),
-        Expr::Case {
-            expr,
-            when_then_expr,
-            else_expr,
-        } => todo!(),
-        Expr::Cast { expr, data_type } => todo!(),
-        Expr::TryCast { expr, data_type } => todo!(),
-        Expr::Sort {
-            expr,
-            asc,
-            nulls_first,
-        } => todo!(),
-        Expr::ScalarFunction { fun, args } => todo!(),
-        Expr::ScalarUDF { fun, args } => todo!(),
+        Expr::GetIndexedField { .. } => todo!(),
+        Expr::Between { .. } => todo!(),
+        Expr::Case { .. } => todo!(),
+        Expr::Cast { .. } => todo!(),
+        Expr::TryCast { .. } => todo!(),
+        Expr::Sort { .. } => todo!(),
+        Expr::ScalarFunction { .. } => todo!(),
+        Expr::ScalarUDF { .. } => todo!(),
         Expr::AggregateFunction {
             fun,
             args,
@@ -1113,27 +1145,13 @@ fn expr_inner_name(expr: &Expr) -> String {
             dbg!(fun, args, distinct);
             panic!()
         }
-        Expr::WindowFunction {
-            fun,
-            args,
-            partition_by,
-            order_by,
-            window_frame,
-        } => todo!(),
-        Expr::AggregateUDF { fun, args } => todo!(),
-        Expr::InList {
-            expr,
-            list,
-            negated,
-        } => todo!(),
+        Expr::WindowFunction { .. } => todo!(),
+        Expr::AggregateUDF { .. } => todo!(),
+        Expr::InList { .. } => todo!(),
         Expr::Wildcard => todo!(),
-        Expr::QualifiedWildcard { qualifier } => todo!(),
-        Expr::Exists { subquery, negated } => todo!(),
-        Expr::InSubquery {
-            expr,
-            subquery,
-            negated,
-        } => todo!(),
+        Expr::QualifiedWildcard { .. } => todo!(),
+        Expr::Exists { .. } => todo!(),
+        Expr::InSubquery { .. } => todo!(),
         Expr::ScalarSubquery(_) => todo!(),
         Expr::GroupingSet(_) => todo!(),
     }
@@ -1142,7 +1160,10 @@ fn expr_inner_name(expr: &Expr) -> String {
 fn datatype_to_ast(data_type: &DataType, _dialect: DatabaseDialect) -> sqlparser::ast::DataType {
     use sqlparser::ast::DataType as DT;
     match data_type {
-        _ => DT::Boolean,
+        DataType::Boolean => DT::Boolean,
+        DataType::Int8 => DT::Int(None),
+        DataType::Date32 => DT::Date,
+        _ => todo!("Casting {:?} is not yet implemented", data_type),
     }
 }
 
@@ -1190,59 +1211,15 @@ fn join_factor_to_ast(
 fn extract_datetime(expr: &Expr) -> sqlparser::ast::DateTimeField {
     use sqlparser::ast::DateTimeField;
     match expr {
-        Expr::Alias(_, _) => todo!(),
-        Expr::Column(_) => todo!(),
-        Expr::ScalarVariable(_, _) => todo!(),
+        // Expr::Alias(_, _) => todo!(),
+        // Expr::Column(_) => todo!(),
+        // Expr::ScalarVariable(_, _) => todo!(),
         Expr::Literal(datafusion::scalar::ScalarValue::Utf8(Some(value))) => match value.as_str() {
             "YEAR" => DateTimeField::Year,
             t => panic!("{}", t),
         },
         Expr::Literal(_) => todo!(),
-        Expr::BinaryExpr { .. } => todo!(),
-        Expr::Not(_) => todo!(),
-        Expr::IsNotNull(_) => todo!(),
-        Expr::IsNull(_) => todo!(),
-        Expr::Negative(_) => todo!(),
-        Expr::GetIndexedField { .. } => todo!(),
-        Expr::Between { .. } => todo!(),
-        Expr::Case { .. } => todo!(),
-        Expr::Cast { expr, data_type } => todo!(),
-        Expr::TryCast { expr, data_type } => todo!(),
-        Expr::Sort {
-            expr,
-            asc,
-            nulls_first,
-        } => todo!(),
-        Expr::ScalarFunction { fun, args } => todo!(),
-        Expr::ScalarUDF { fun, args } => todo!(),
-        Expr::AggregateFunction {
-            fun,
-            args,
-            distinct,
-        } => todo!(),
-        Expr::WindowFunction {
-            fun,
-            args,
-            partition_by,
-            order_by,
-            window_frame,
-        } => todo!(),
-        Expr::AggregateUDF { fun, args } => todo!(),
-        Expr::InList {
-            expr,
-            list,
-            negated,
-        } => todo!(),
-        Expr::Exists { subquery, negated } => todo!(),
-        Expr::InSubquery {
-            expr,
-            subquery,
-            negated,
-        } => todo!(),
-        Expr::ScalarSubquery(_) => todo!(),
-        Expr::Wildcard => todo!(),
-        Expr::QualifiedWildcard { qualifier } => todo!(),
-        Expr::GroupingSet(_) => todo!(),
+        t => panic!("Cant extract date from {:?}", t),
     }
 }
 #[cfg(test)]
@@ -1252,15 +1229,12 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::datasource::datasource::TableProviderFilterPushDown;
     use datafusion::error::Result as DfResult;
     use datafusion::execution::context::SessionState;
-    use datafusion::logical_expr::{TableSource, TableType};
-    use datafusion::logical_plan::plan::DefaultTableSource;
+    use datafusion::logical_expr::TableType;
     use datafusion::{
-        arrow::datatypes::SchemaRef, datasource::TableProvider, logical_plan::LogicalPlanBuilder,
-        physical_plan::ExecutionPlan,
+        arrow::datatypes::SchemaRef, datasource::TableProvider, physical_plan::ExecutionPlan,
     };
 
     struct TestTableProvider {
@@ -1327,43 +1301,7 @@ mod tests {
 
     #[test]
     fn test_ast() {
-        let query = "select
-        cntrycode,
-        count(*) as numcust,
-        sum(c_acctbal) as totacctbal
-    from
-        (
-            select
-                substring(c_phone from 1 for 2) as cntrycode,
-                c_acctbal
-            from
-                bench.public.customer
-            where
-                    substring(c_phone from 1 for 2) in
-                    ('13', '31', '23', '29', '30', '18', '17')
-              and c_acctbal > (
-                select
-                    avg(c_acctbal)
-                from
-                    bench.public.customer
-                where
-                        c_acctbal > 0.00
-                  and substring(c_phone from 1 for 2) in
-                      ('13', '31', '23', '29', '30', '18', '17')
-            )
-              and exists (
-                    select
-                        *
-                    from
-                        bench.public.orders
-                    where
-                            o_custkey = c_custkey
-                )
-        ) as custsale
-    group by
-        cntrycode
-    order by
-        cntrycode";
+        let query = "select * from a where b in (1,2,3)";
         let dialect = sqlparser::dialect::PostgreSqlDialect {};
         let out = sqlparser::parser::Parser::parse_sql(&dialect, query).unwrap();
         println!("AST: {:#?}", out);

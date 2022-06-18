@@ -280,18 +280,22 @@ impl PhysicalPlanner for SqlPhysicalQueryPlanner {
 /// Utility function to fix SQL queries' expressions that are invalid.
 /// Exmaple: `Uint64(x)` -> `x`
 fn fix_query(query: &str) -> String {
+    // TODO: compile these once, but this is a fallback to not stall development.
+    // A more correct solution is to support writing SQL strings from sqlparser-rs.
     let re_int64 = regex::Regex::new(r"Int64\((?P<value>\d+)\)").unwrap();
     let re_uint64 = regex::Regex::new(r"Uint64\((?P<value>\d+)\)").unwrap();
+    let re_float64 = regex::Regex::new(r"Float64\((?P<value>[\d.]+)\)").unwrap();
     let re_l_lit = regex::Regex::new(r"(?P<value>\d+)L").unwrap();
-    let query = re_int64.replace_all(query, "$value").to_string();
+    let query = re_int64.replace_all(query, "$value");
     let query = re_uint64.replace_all(&query, "$value");
+    let query = re_float64.replace_all(&query, "$value");
     let query = re_l_lit.replace_all(&query, "$value");
     query.to_string()
 }
 
 #[test]
 fn test_fix_query() {
-    let query = "select Int64(1), Int64(100), Uint64(1000), 1L";
+    let query = r#"select Int64(1), Int64(100), Uint64(1000), 1L"#;
     let fixed = fix_query(query);
     assert_eq!(&fixed, "select 1, 100, 1000, 1")
 }
