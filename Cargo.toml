@@ -3,13 +3,16 @@ name = "datafusion-rdbms-ext"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+default = []
+# Enable the AST rewriter. If disabled, projection and filtering are supported
+ast-rewrite = []
 
 [dependencies]
 # Currently depends on some minor changes to DataFusion (TableSource)
-# datafusion = { path = "../arrow-datafusion/datafusion/core", features = ["jit"] }
-datafusion = { git = "https://github.com/nevi-me/arrow-datafusion", branch = "dbms-changes-2022-06-18", features = ["jit"] }
-sqlparser = "0.17.0"
+datafusion = { path = "../arrow-datafusion/datafusion/core", features = ["jit"] }
+# datafusion = { git = "https://github.com/nevi-me/arrow-datafusion", branch = "dbms-changes-2022-06-18", features = ["jit"] }
+sqlparser = "0.18.0"
 async-trait = "0.1"
 futures-util = "0.3"
 # TODO: create separate features for sources, link them to DB dialects
