@@ -3,12 +3,12 @@
 use std::sync::Arc;
 
 use datafusion::{
-    datasource::datasource::Source,
+    datasource::datasource::TableOrigin,
     logical_plan::{plan::Extension, LogicalPlan},
-    optimizer::{optimizer::OptimizerRule, utils::optimize_children},
+    optimizer::{optimizer::OptimizerRule, utils::optimize_children, OptimizerConfig},
 };
 
-use crate::node::{SqlAstPlanNode};
+use crate::node::SqlAstPlanNode;
 /// A rule that optimizes a sequential Projection + Aggregate
 pub struct ProjectionAggregateOptimizerRule {}
 
@@ -16,7 +16,7 @@ impl OptimizerRule for ProjectionAggregateOptimizerRule {
     fn optimize(
         &self,
         plan: &LogicalPlan,
-        execution_props: &datafusion::execution::context::ExecutionProps,
+        optimizer_config: &OptimizerConfig,
     ) -> datafusion::error::Result<LogicalPlan> {
         // Look for Projection > Aggregate > TableScan (or supported extension)
         // Projection + Aggregate can sometimes be a (re)naming of an aggregate calculation
@@ -24,7 +24,7 @@ impl OptimizerRule for ProjectionAggregateOptimizerRule {
             if let LogicalPlan::Aggregate(aggregate) = &*projection.input {
                 if let LogicalPlan::TableScan(scan) = &*aggregate.input {
                     // Check that the table scan is a RDBMS scan
-                    if let Source::Relational { .. } = scan.source.source() {
+                    if let TableOrigin::Relational { .. } = scan.source.origin() {
                         // Try to create an AST node
                         let ast_node = SqlAstPlanNode::try_from_plan(plan);
                         match ast_node {
@@ -36,7 +36,7 @@ impl OptimizerRule for ProjectionAggregateOptimizerRule {
                             Err(e) => {
                                 // write warning
                                 eprintln!("Error converting to AST node: {e}");
-                                return optimize_children(self, plan, execution_props);
+                                return optimize_children(self, plan, optimizer_config);
                             }
                         }
                     }
@@ -54,7 +54,7 @@ impl OptimizerRule for ProjectionAggregateOptimizerRule {
                 if let LogicalPlan::Projection(ref inner_projection) = &*aggregate.input {
                     if let LogicalPlan::TableScan(scan) = &*inner_projection.input {
                         // Check that the table scan is a RDBMS scan
-                        if let Source::Relational { .. } = scan.source.source() {
+                        if let TableOrigin::Relational { .. } = scan.source.origin() {
                             // Try to create an AST node
                             let ast_node = SqlAstPlanNode::try_from_plan(plan);
                             match ast_node {
@@ -66,7 +66,7 @@ impl OptimizerRule for ProjectionAggregateOptimizerRule {
                                 Err(e) => {
                                     // write warning
                                     eprintln!("Error converting to AST node: {e}");
-                                    return optimize_children(self, plan, execution_props);
+                                    return optimize_children(self, plan, optimizer_config);
                                 }
                             }
                         }
@@ -77,7 +77,7 @@ impl OptimizerRule for ProjectionAggregateOptimizerRule {
 
         // If we didn't find the Limit/Sort combination, recurse as
         // normal and build the result.
-        optimize_children(self, plan, execution_props)
+        optimize_children(self, plan, optimizer_config)
     }
 
     fn name(&self) -> &str {
@@ -92,12 +92,11 @@ impl OptimizerRule for CrossJoinFilterRule {
     fn optimize(
         &self,
         plan: &LogicalPlan,
-        execution_props: &datafusion::execution::context::ExecutionProps,
+        optimizer_config: &OptimizerConfig,
     ) -> datafusion::error::Result<LogicalPlan> {
-
         // If we didn't find the Limit/Sort combination, recurse as
         // normal and build the result.
-        optimize_children(self, plan, execution_props)
+        optimize_children(self, plan, optimizer_config)
     }
 
     fn name(&self) -> &str {
@@ -113,7 +112,7 @@ impl OptimizerRule for QueryPushdownOptimizerRule {
     fn optimize(
         &self,
         plan: &LogicalPlan,
-        execution_props: &datafusion::execution::context::ExecutionProps,
+        optimizer_config: &OptimizerConfig,
     ) -> datafusion::common::Result<LogicalPlan> {
         // Try to create an AST node
         let ast_node = SqlAstPlanNode::try_from_plan(plan);
@@ -124,7 +123,7 @@ impl OptimizerRule for QueryPushdownOptimizerRule {
             Err(e) => {
                 // write warning
                 eprintln!("Error converting to AST node: {e}");
-                optimize_children(self, plan, execution_props)
+                optimize_children(self, plan, optimizer_config)
             }
         }
     }

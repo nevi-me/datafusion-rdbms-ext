@@ -35,7 +35,56 @@ Arrow has Flight SQL, which could be a first-class citizen for connections. Whil
 Nothing. I mostly have code from the DataFusion TopK planner, which I've been converting to support my desired use-case.
 There's some changes needed in DF, such as being able to specify a table source so we can know if we're reading from a DB or flat file.
 
-The dirty code can be found in the `origins` branch.
+### TPC-H Derived Queries
+
+There are some general blockers affecting the pushing down of some TPC-H derived queries.
+These blockers include:
+
+- [ ] Literals are formatted with their type, e.g. `Uint32(1)` instead of plain value (`1`), this results in invalid SQL queries generated.
+
+Here is a list of the queries, that shows which tests pass, or what is missing.
+
+- [x] Q1
+  - [x] Passes
+  - [x] Accurate result
+  - Relies on fixing query with regex
+- [ ] Q2
+  - `ScalarSubquery` not supported in `expr_to_sql`
+- [x] Q3
+- [ ] Q4
+  - Error: `Execution("DateIntervalExpr does not support IntervalYearMonth")`
+- [X] Q5
+- [x] Q6
+- [ ] Q7
+- [ ] Q8
+  - Query parser error
+- [ ] Q9
+  - Query parser error
+- [-] Q10
+  - [X] Passes
+  - [ ] Accurate result
+- [ ] Q11
+- [ ] Q12
+- [ ] Q13
+- [ ] Q14
+  - String literal interpreted as column name
+- [ ] Q15
+  - DataFusion context only supports a single statement
+- [ ] Q16
+  - HashJoin error on `equal_rows_elem!(Int64Array, l, r, left, right, null_equals_null)`
+- [ ] Q17
+  - `ScalarSubquery` not supported in `expr_to_sql`
+- [ ] Q18
+  - `300L` in query
+- [ ] Q19
+  - DF creates a cross join, not yet supported in parser
+  - `ScalarSubquery` not supported in `expr_to_sql`
+- [ ] Q20
+- [ ] Q21
+  - Requires `Expr::Exists` to be supported by physical planner (should be possible to bypass this)
+- [ ] Q22
+  - `Uint64(n)` converted to `nL`
+
 
 ## Counter-Points
 

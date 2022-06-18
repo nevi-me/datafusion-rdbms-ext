@@ -9,6 +9,7 @@ pub enum RdbmsError {
     /// There was an error with executing some query on a database
     DatabaseError(String),
     UnsupportedType(String),
+    UnsupportedQuery(String),
 }
 
 impl std::error::Error for RdbmsError {}
@@ -18,6 +19,7 @@ impl Display for RdbmsError {
         match self {
             RdbmsError::DatabaseError(err) => f.write_str(err),
             RdbmsError::UnsupportedType(err) => f.write_str(err),
+            RdbmsError::UnsupportedQuery(err) => f.write_str(err),
         }
     }
 }

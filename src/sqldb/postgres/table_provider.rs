@@ -6,13 +6,12 @@ use std::{any::Any, sync::Arc};
 use datafusion::{
     arrow::datatypes::SchemaRef,
     datasource::{
-        datasource::Source, datasource::TableProviderFilterPushDown as FPD, TableProvider,
+        datasource::TableOrigin, datasource::TableProviderFilterPushDown as FPD, TableProvider,
         TableType,
     },
     error::{DataFusionError, Result as DfResult},
-    execution::context::TaskContext,
-    logical_expr::TableSource,
-    logical_plan::{plan::DefaultTableSource, Expr},
+    execution::context::{SessionState, TaskContext},
+    logical_plan::Expr,
     physical_plan::ExecutionPlan,
 };
 use log::debug;
@@ -68,8 +67,8 @@ impl TableProvider for PostgresTableProvider {
         self.table_type
     }
 
-    fn source(&self) -> Source {
-        Source::Relational {
+    fn origin(&self) -> TableOrigin {
+        TableOrigin::Relational {
             server: None, // TODO should parse it from connection string
             database: Some(self.connection.database.to_string()),
             schema: Some(self.schema_name.clone()),
@@ -79,6 +78,7 @@ impl TableProvider for PostgresTableProvider {
 
     async fn scan(
         &self,
+        _ctx: &SessionState,
         projection: &Option<Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,

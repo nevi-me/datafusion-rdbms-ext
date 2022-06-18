@@ -7,7 +7,8 @@ edition = "2021"
 
 [dependencies]
 # Currently depends on some minor changes to DataFusion (TableSource)
-datafusion = { git = "https://github.com/apache/arrow-datafusion", branch = "rdbms-changes", features = ["jit"] }
+# datafusion = { path = "../arrow-datafusion/datafusion/core", features = ["jit"] }
+datafusion = { git = "https://github.com/nevi-me/arrow-datafusion", branch = "dbms-changes-2022-06-18", features = ["jit"] }
 sqlparser = "0.17.0"
 async-trait = "0.1"
 futures-util = "0.3"
@@ -17,6 +18,7 @@ tokio = { version = "1", features = ["macros"] }
 tokio-stream = "0.1"
 bytes = "1"
 log = "0.4"
+regex = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros"] }

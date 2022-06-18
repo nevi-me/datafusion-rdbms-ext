@@ -96,7 +96,7 @@ pub async fn read_from_query<'a>(
             DataType::List(_) => vec![],
             DataType::FixedSizeList(_, len) => vec![0; *len as usize],
             DataType::Struct(_) => vec![],
-            DataType::Union(_, _) => vec![],
+            DataType::Union(_, _, _) => vec![],
             DataType::Dictionary(_, _) => vec![],
             DataType::LargeBinary => vec![],
             DataType::LargeUtf8 => vec![],
@@ -235,7 +235,6 @@ fn complete_batch(
                     let data = ArrayData::try_new(
                         f.data_type().clone(),
                         num_records,
-                        None,
                         Some(null_buffer),
                         0,
                         vec![bool_buffer],
@@ -264,7 +263,6 @@ fn complete_batch(
                     let data = ArrayData::try_new(
                         f.data_type().clone(),
                         num_records,
-                        None,
                         Some(null_buffer),
                         0,
                         vec![b.into()],
@@ -277,7 +275,6 @@ fn complete_batch(
                     let data = ArrayData::try_new(
                         f.data_type().clone(),
                         num_records,
-                        None,
                         Some(null_buffer),
                         0,
                         vec![b.into()],
@@ -297,7 +294,6 @@ fn complete_batch(
                     let data = ArrayData::try_new(
                         f.data_type().clone(),
                         num_records,
-                        None,
                         Some(null_buffer),
                         0,
                         vec![Buffer::from(offsets.to_byte_slice()), b.into()],
@@ -314,7 +310,6 @@ fn complete_batch(
                     let data = ArrayData::try_new(
                         f.data_type().clone(),
                         num_records,
-                        None,
                         Some(null_buffer),
                         0,
                         vec![b.into()],
@@ -327,7 +322,6 @@ fn complete_batch(
                     let data = ArrayData::try_new(
                         f.data_type().clone(),
                         num_records,
-                        None,
                         Some(null_buffer),
                         0,
                         vec![b.into()],
@@ -340,7 +334,6 @@ fn complete_batch(
                     let data = ArrayData::try_new(
                         f.data_type().clone(),
                         num_records,
-                        None,
                         Some(null_buffer),
                         0,
                         vec![b.into()],

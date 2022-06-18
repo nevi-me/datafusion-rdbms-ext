@@ -2,8 +2,9 @@ use std::borrow::BorrowMut;
 use std::collections::HashMap;
 
 use datafusion::arrow::datatypes::DataType;
-use datafusion::datasource::datasource::Source;
+use datafusion::datasource::datasource::TableOrigin;
 use datafusion::error::Result as DfResult;
+use datafusion::logical_expr::BuiltinScalarFunction;
 use datafusion::logical_plan::plan::DefaultTableSource;
 use datafusion::logical_plan::*;
 use datafusion::physical_plan::aggregates::AggregateFunction;
@@ -11,7 +12,7 @@ use sqlparser::ast::{Ident, ObjectName, SelectItem};
 
 use crate::error::RdbmsError;
 use crate::node::SqlAstPlanNode;
-use crate::sqldb::postgres::table_provider::{PostgresTableProvider};
+use crate::sqldb::postgres::table_provider::PostgresTableProvider;
 use crate::sqldb::DatabaseConnector;
 
 pub struct LogicalPlanExt {
@@ -28,16 +29,16 @@ pub enum DatabaseDialect {
     // Oracle,
 }
 
-/// A trait to convert a logical plan to SQL
-pub trait LogicalPlanSqlExt {
-    fn to_sql(&self) -> DfResult<String>;
-}
+// /// A trait to convert a logical plan to SQL
+// pub trait LogicalPlanSqlExt {
+//     fn to_sql(&self) -> DfResult<String>;
+// }
 
-impl LogicalPlanSqlExt for LogicalPlanExt {
-    fn to_sql(&self) -> DfResult<String> {
-        logical_plan_to_sql(&self.plan, self.dialect)
-    }
-}
+// impl LogicalPlanSqlExt for LogicalPlanExt {
+//     fn to_sql(&self) -> DfResult<String> {
+//         logical_plan_to_sql(&self.plan, self.dialect)
+//     }
+// }
 
 /// Converts a logical plan to SQL AST
 pub fn logical_plan_to_ast(
@@ -46,7 +47,10 @@ pub fn logical_plan_to_ast(
 ) -> Result<(sqlparser::ast::Query, DatabaseConnector), RdbmsError> {
     use datafusion::logical_plan::Expr as InExpr;
     use sqlparser::ast::*;
-    println!("------------------------\nPlan to AST input:\n{:#?}\n------------------------", plan);
+    println!(
+        "------------------------\nPlan to AST input:\n{:#?}\n------------------------",
+        plan
+    );
     Ok(match plan {
         LogicalPlan::Projection(outer_project) => {
             if let LogicalPlan::Aggregate(agg) = &*outer_project.input {
@@ -194,15 +198,17 @@ pub fn logical_plan_to_ast(
             } else if let LogicalPlan::Join(_) = &*outer_project.input {
                 // A join with a select
                 let (mut join, connector) = logical_plan_to_ast(&outer_project.input, dialect)?;
-                let projection = outer_project.expr.iter().map(|expr| {
-                    expr_to_select_item(expr, dialect)
-                }).collect::<Vec<_>>();
+                let projection = outer_project
+                    .expr
+                    .iter()
+                    .map(|expr| expr_to_select_item(expr, dialect))
+                    .collect::<Vec<_>>();
                 // Replace the join's projection
                 match join.body.borrow_mut() {
                     SetExpr::Select(select) => {
                         select.projection = projection;
-                    },
-                    _ => panic!()
+                    }
+                    _ => panic!(),
                 }
                 return Ok((join, connector));
             }
@@ -221,14 +227,9 @@ pub fn logical_plan_to_ast(
                     // So the query here could have some redundant projections.
                     // Some of the projection values might be new columns generated through
                     // calculations, so how would I know?
-                    panic!("1")
+                    panic!("Query: {:#?}", query.to_string())
                 }
-                SetExpr::SetOperation {
-                    op,
-                    all,
-                    left,
-                    right,
-                } => todo!(),
+                SetExpr::SetOperation { .. } => todo!(),
                 SetExpr::Values(_) => todo!(),
                 SetExpr::Insert(_) => todo!(),
             }
@@ -246,11 +247,18 @@ pub fn logical_plan_to_ast(
                 inner_query.1,
             )
         }
-        LogicalPlan::Filter(_filter) => {
+        LogicalPlan::Filter(filter) => {
             // A filter can loosely be expressed as "select * from input where {predicate}"
             // While this nests a table select, we ordinarily expect to generate SQL code
             // from an already optimised LogicalPlan, so this should not be a common occurrence
-            todo!()
+            let (mut query, connector) = logical_plan_to_ast(&filter.input, dialect)?;
+            match query.body.borrow_mut() {
+                SetExpr::Select(select) => {
+                    select.selection = Some(expr_to_ast(&filter.predicate, dialect))
+                }
+                _ => panic!(),
+            }
+            return Ok((query, connector));
         }
         LogicalPlan::Window(_) => todo!(),
         LogicalPlan::Aggregate(aggregate) => {
@@ -309,7 +317,7 @@ pub fn logical_plan_to_ast(
             (input, connector)
         }
         LogicalPlan::Join(join) => {
-            let join_operator = join_factor_to_ast(join, dialect);
+            let join_operator = join_factor_to_ast(join, dialect)?;
             let (mut left, connector) = logical_plan_to_ast(&join.left, dialect)?;
             let (right, _) = logical_plan_to_ast(&join.right, dialect)?;
             let body = match (left.body.borrow_mut(), right.body) {
@@ -322,9 +330,11 @@ pub fn logical_plan_to_ast(
                     left_select.from[0] = from;
                     // Add columns from right
                     // TODO: this could be simplified to a Wildcard
-                    left_select.projection.extend_from_slice(&right_select.projection);
+                    left_select
+                        .projection
+                        .extend_from_slice(&right_select.projection);
                     left_select.clone()
-                },
+                }
                 // SetExpr::Query(_) => todo!(),
                 // SetExpr::SetOperation {
                 //     op,
@@ -358,8 +368,8 @@ pub fn logical_plan_to_ast(
             // Table scans only make sense when dealing with an expected data source.
             // An expected source would first be a RDBMS, and have the same dialect as
             // the input variable.
-            let connector = match scan.source.source() {
-                Source::Relational { .. } => {
+            let connector = match scan.source.origin() {
+                TableOrigin::Relational { .. } => {
                     // TODO: should we downcast the source to find its dialect?
                     // Trait downcasting would be useful here
                     let source = scan
@@ -447,7 +457,13 @@ pub fn logical_plan_to_ast(
         LogicalPlan::EmptyRelation(_) => todo!(),
         LogicalPlan::Limit(limit) => {
             let (mut input, connector) = logical_plan_to_ast(&limit.input, dialect)?;
-            input.limit = Some(Expr::Value(Value::Number(limit.n.to_string(), false)));
+            input.limit = limit
+                .fetch
+                .map(|fetch| Expr::Value(Value::Number(fetch.to_string(), false)));
+            input.offset = limit.skip.map(|skip| Offset {
+                value: Expr::Value(Value::Number(skip.to_string(), false)),
+                rows: OffsetRows::None,
+            });
             (input, connector)
         }
         LogicalPlan::CreateExternalTable(_) => todo!(),
@@ -464,115 +480,37 @@ pub fn logical_plan_to_ast(
             }
         }
         LogicalPlan::CreateCatalogSchema(_) => todo!(),
-        LogicalPlan::SubqueryAlias(_) => todo!(),
-        LogicalPlan::CreateCatalog(_) => todo!(),
-        LogicalPlan::Subquery(_) => todo!(),
-        LogicalPlan::Offset(_) => todo!(),
-        LogicalPlan::CreateView(_) => todo!(),
-    })
-}
-
-/// An inner function that converts a [&LogicalPlan] to a SQL query
-pub fn logical_plan_to_sql(plan: &LogicalPlan, dialect: DatabaseDialect) -> DfResult<String> {
-    Ok(match plan {
-        LogicalPlan::Projection(projection) => {
-            let projected = projection
-                .expr
-                .iter()
-                .map(|expr| expr_to_sql(expr, dialect))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "SELECT {} FROM {}",
-                projected,
-                logical_plan_to_sql(&projection.input, dialect)?
-            )
-        }
-        LogicalPlan::Filter(filter) => {
-            // A filter can loosely be expressed as "select * from input where {predicate}"
-            // While this nests a table select, we ordinarily expect to generate SQL code
-            // from an already optimised LogicalPlan, so this should not be a common occurrence
-            format!(
-                "SELECT * FROM ({}) {} WHERE {}",
-                logical_plan_to_sql(&filter.input, dialect)?,
-                "tbl_a", // TODO: this shouldn't be hardcoded
-                expr_to_sql(&filter.predicate, dialect)
-            )
-        }
-        LogicalPlan::Window(_) => todo!(),
-        LogicalPlan::Aggregate(aggregate) => {
-            let proj = aggregate
-                .aggr_expr
-                .iter()
-                .map(|expr| expr_to_sql(expr, dialect))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let aggr = aggregate
-                .group_expr
-                .iter()
-                .map(|expr| expr_to_sql(expr, dialect))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "SELECT {} FROM {}{}",
-                proj,
-                if aggregate.group_expr.is_empty() {
-                    ""
-                } else {
-                    " GROUP BY "
+        LogicalPlan::SubqueryAlias(subquery_alias) => {
+            // Table with alias
+            let (mut query, connector) = logical_plan_to_ast(&subquery_alias.input, dialect)?;
+            match query.body.borrow_mut() {
+                SetExpr::Select(select) => match select.from.get_mut(0) {
+                    Some(from) => match from.relation.borrow_mut() {
+                        TableFactor::Table { alias, .. } => {
+                            *alias = Some(TableAlias {
+                                name: Ident {
+                                    value: subquery_alias.alias.clone(),
+                                    quote_style: None,
+                                },
+                                columns: vec![],
+                            })
+                        }
+                        TableFactor::Derived {
+                            lateral,
+                            subquery,
+                            alias,
+                        } => todo!(),
+                        TableFactor::TableFunction { expr, alias } => todo!(),
+                        TableFactor::NestedJoin(_) => todo!(),
+                    },
+                    None => panic!(),
                 },
-                aggr
-            )
+                _ => panic!(),
+            }
+            return Ok((query, connector));
         }
-        LogicalPlan::Sort(_) => todo!(),
-        LogicalPlan::Join(_) => todo!(),
-        LogicalPlan::CrossJoin(_) => todo!(),
-        LogicalPlan::Repartition(_) => todo!(),
-        LogicalPlan::Union(_) => todo!(),
-        LogicalPlan::TableScan(scan) => {
-            let projection_sql = match &scan.projection {
-                None => String::from("*"),
-                Some(projection) => projection
-                    .iter()
-                    .map(|index| scan.source.schema().field(*index).name().clone())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            };
-            let filter_sql = if scan.filters.is_empty() {
-                String::new()
-            } else {
-                // TODO: find the most performant solution.
-                // See https://stackoverflow.com/questions/36941851/whats-an-idiomatic-way-to-print-an-iterator-separated-by-spaces-in-rust
-                scan.filters
-                    .iter()
-                    .map(|filter| expr_to_sql(filter, dialect))
-                    .fold(String::from(" WHERE "), |a, b| a + "AND " + &b)
-                    .replace("WHERE AND ", "WHERE ")
-            };
-            format!(
-                "SELECT {} FROM {}{}{}",
-                projection_sql,
-                scan.table_name,
-                filter_sql,
-                scan.limit
-                    .map(|l| format!(" LIMIT {}", l))
-                    .unwrap_or_default()
-            )
-        }
-        LogicalPlan::EmptyRelation(_) => todo!(),
-        LogicalPlan::Limit(_) => todo!(),
-        LogicalPlan::CreateExternalTable(_) => todo!(),
-        LogicalPlan::CreateMemoryTable(_) => todo!(),
-        LogicalPlan::DropTable(_) => todo!(),
-        LogicalPlan::Values(_) => todo!(),
-        LogicalPlan::Explain(_) => todo!(),
-        LogicalPlan::Analyze(_) => todo!(),
-        LogicalPlan::Extension(_) => todo!(),
-        LogicalPlan::CreateCatalogSchema(_) => todo!(),
-        LogicalPlan::SubqueryAlias(_) => todo!(),
         LogicalPlan::CreateCatalog(_) => todo!(),
         LogicalPlan::Subquery(_) => todo!(),
-        LogicalPlan::Offset(_) => todo!(),
         LogicalPlan::CreateView(_) => todo!(),
     })
 }
@@ -605,7 +543,9 @@ fn expr_to_select_item(expr: &Expr, dialect: DatabaseDialect) -> SelectItem {
 fn expr_to_ast(expr: &Expr, dialect: DatabaseDialect) -> sqlparser::ast::Expr {
     use datafusion::scalar::ScalarValue;
     use sqlparser::ast::Expr as OutExpr;
-    use sqlparser::ast::{BinaryOperator, Function, FunctionArg, FunctionArgExpr, Ident, Value};
+    use sqlparser::ast::{
+        BinaryOperator, Function, FunctionArg, FunctionArgExpr, Ident, UnaryOperator, Value,
+    };
     match expr {
         Expr::Alias(expr, _) => {
             // TODO: alias can be function expr (e.g. bench.public.lineitem.l_extendedprice * Int64(1) - bench.public.lineitem.l_discount)
@@ -670,21 +610,15 @@ fn expr_to_ast(expr: &Expr, dialect: DatabaseDialect) -> sqlparser::ast::Expr {
                 ScalarValue::TimestampMillisecond(_, _) => todo!(),
                 ScalarValue::TimestampMicrosecond(_, _) => todo!(),
                 ScalarValue::TimestampNanosecond(_, _) => todo!(),
-                ScalarValue::IntervalYearMonth(_) => todo!(),
+                ScalarValue::IntervalYearMonth(Some(value)) => {
+                    OutExpr::Value(Value::SingleQuotedString(value.to_string()))
+                }
                 ScalarValue::IntervalDayTime(_) => todo!(),
                 ScalarValue::IntervalMonthDayNano(_) => todo!(),
                 ScalarValue::Struct(_, _) => todo!(),
                 _ => todo!(),
             }
         }
-        // Expr::Literal(lit) => match lit {
-        //     ScalarValue::Date32(Some(value)) => {
-        //         let datetime = datafusion::arrow::temporal_conversions::date32_to_datetime(*value);
-        //         let date = datetime.format("%Y-%m-%d").to_string();
-        //         format!("'{date}'")
-        //     }
-        //     _ => lit.to_string(),
-        // },
         Expr::BinaryExpr { left, op, right } => {
             // TODO: expand into a match statement if some ops don't translate to SQL
             let op = match op {
@@ -740,9 +674,26 @@ fn expr_to_ast(expr: &Expr, dialect: DatabaseDialect) -> sqlparser::ast::Expr {
             low: Box::new(expr_to_ast(low, dialect)),
             high: Box::new(expr_to_ast(high, dialect)),
         },
-        Expr::Case { .. } => {
-            todo!()
-        }
+        Expr::Case {
+            expr,
+            when_then_expr,
+            else_expr,
+        } => OutExpr::Case {
+            operand: expr
+                .as_ref()
+                .map(|expr| Box::new(expr_to_ast(expr, dialect))),
+            conditions: when_then_expr
+                .iter()
+                .map(|(expr, _)| expr_to_ast(expr, dialect))
+                .collect(),
+            results: when_then_expr
+                .iter()
+                .map(|(_, expr)| expr_to_ast(expr, dialect))
+                .collect(),
+            else_result: else_expr
+                .as_ref()
+                .map(|expr| Box::new(expr_to_ast(expr, dialect))),
+        },
         Expr::Cast { expr, data_type } => OutExpr::Cast {
             expr: Box::new(expr_to_ast(expr, dialect)),
             data_type: datatype_to_ast(data_type, dialect),
@@ -751,7 +702,81 @@ fn expr_to_ast(expr: &Expr, dialect: DatabaseDialect) -> sqlparser::ast::Expr {
         Expr::Sort { .. } => {
             panic!("Sort not supported as expression, handled in logical plan")
         }
-        Expr::ScalarFunction { .. } => todo!(),
+        Expr::ScalarFunction { fun, args } => match fun {
+            BuiltinScalarFunction::Abs => todo!(),
+            BuiltinScalarFunction::Acos => todo!(),
+            BuiltinScalarFunction::Asin => todo!(),
+            BuiltinScalarFunction::Atan => todo!(),
+            BuiltinScalarFunction::Ceil => todo!(),
+            BuiltinScalarFunction::Coalesce => todo!(),
+            BuiltinScalarFunction::Cos => todo!(),
+            BuiltinScalarFunction::Digest => todo!(),
+            BuiltinScalarFunction::Exp => todo!(),
+            BuiltinScalarFunction::Floor => todo!(),
+            BuiltinScalarFunction::Ln => todo!(),
+            BuiltinScalarFunction::Log => todo!(),
+            BuiltinScalarFunction::Log10 => todo!(),
+            BuiltinScalarFunction::Log2 => todo!(),
+            BuiltinScalarFunction::Power => todo!(),
+            BuiltinScalarFunction::Round => todo!(),
+            BuiltinScalarFunction::Signum => todo!(),
+            BuiltinScalarFunction::Sin => todo!(),
+            BuiltinScalarFunction::Sqrt => todo!(),
+            BuiltinScalarFunction::Tan => todo!(),
+            BuiltinScalarFunction::Trunc => todo!(),
+            BuiltinScalarFunction::Array => todo!(),
+            BuiltinScalarFunction::Ascii => todo!(),
+            BuiltinScalarFunction::BitLength => todo!(),
+            BuiltinScalarFunction::Btrim => todo!(),
+            BuiltinScalarFunction::CharacterLength => todo!(),
+            BuiltinScalarFunction::Chr => todo!(),
+            BuiltinScalarFunction::Concat => todo!(),
+            BuiltinScalarFunction::ConcatWithSeparator => todo!(),
+            BuiltinScalarFunction::DatePart => OutExpr::Extract {
+                field: extract_datetime(&args[0]),
+                expr: Box::new(expr_to_ast(&args[1], dialect)),
+            },
+            BuiltinScalarFunction::DateTrunc => todo!(),
+            BuiltinScalarFunction::InitCap => todo!(),
+            BuiltinScalarFunction::Left => todo!(),
+            BuiltinScalarFunction::Lpad => todo!(),
+            BuiltinScalarFunction::Lower => todo!(),
+            BuiltinScalarFunction::Ltrim => todo!(),
+            BuiltinScalarFunction::MD5 => todo!(),
+            BuiltinScalarFunction::NullIf => todo!(),
+            BuiltinScalarFunction::OctetLength => todo!(),
+            BuiltinScalarFunction::Random => todo!(),
+            BuiltinScalarFunction::RegexpReplace => todo!(),
+            BuiltinScalarFunction::Repeat => todo!(),
+            BuiltinScalarFunction::Replace => todo!(),
+            BuiltinScalarFunction::Reverse => todo!(),
+            BuiltinScalarFunction::Right => todo!(),
+            BuiltinScalarFunction::Rpad => todo!(),
+            BuiltinScalarFunction::Rtrim => todo!(),
+            BuiltinScalarFunction::SHA224 => todo!(),
+            BuiltinScalarFunction::SHA256 => todo!(),
+            BuiltinScalarFunction::SHA384 => todo!(),
+            BuiltinScalarFunction::SHA512 => todo!(),
+            BuiltinScalarFunction::SplitPart => todo!(),
+            BuiltinScalarFunction::StartsWith => todo!(),
+            BuiltinScalarFunction::Strpos => todo!(),
+            BuiltinScalarFunction::Substr => OutExpr::Substring {
+                expr: Box::new(expr_to_ast(&args[0], dialect)),
+                substring_from: Some(Box::new(expr_to_ast(&args[1], dialect))),
+                substring_for: Some(Box::new(expr_to_ast(&args[2], dialect))),
+            },
+            BuiltinScalarFunction::ToHex => todo!(),
+            BuiltinScalarFunction::ToTimestamp => todo!(),
+            BuiltinScalarFunction::ToTimestampMillis => todo!(),
+            BuiltinScalarFunction::ToTimestampMicros => todo!(),
+            BuiltinScalarFunction::ToTimestampSeconds => todo!(),
+            BuiltinScalarFunction::Now => todo!(),
+            BuiltinScalarFunction::Translate => todo!(),
+            BuiltinScalarFunction::Trim => todo!(),
+            BuiltinScalarFunction::Upper => todo!(),
+            BuiltinScalarFunction::RegexpMatch => todo!(),
+            BuiltinScalarFunction::Struct => todo!(),
+        },
         Expr::ScalarUDF { .. } => todo!(),
         Expr::AggregateFunction {
             fun,
@@ -782,8 +807,30 @@ fn expr_to_ast(expr: &Expr, dialect: DatabaseDialect) -> sqlparser::ast::Expr {
                 over: None,
                 distinct: *distinct,
             }),
-            AggregateFunction::Min => todo!(),
-            AggregateFunction::Max => todo!(),
+            AggregateFunction::Min => OutExpr::Function(Function {
+                name: ObjectName(vec![Ident {
+                    value: "min".to_string(),
+                    quote_style: None,
+                }]),
+                args: args
+                    .iter()
+                    .map(|e| FunctionArg::Unnamed(FunctionArgExpr::Expr(expr_to_ast(e, dialect))))
+                    .collect(),
+                over: None,
+                distinct: *distinct,
+            }),
+            AggregateFunction::Max => OutExpr::Function(Function {
+                name: ObjectName(vec![Ident {
+                    value: "max".to_string(),
+                    quote_style: None,
+                }]),
+                args: args
+                    .iter()
+                    .map(|e| FunctionArg::Unnamed(FunctionArgExpr::Expr(expr_to_ast(e, dialect))))
+                    .collect(),
+                over: None,
+                distinct: *distinct,
+            }),
             AggregateFunction::Avg => OutExpr::Function(Function {
                 name: ObjectName(vec![Ident {
                     value: "avg".to_string(),
@@ -831,9 +878,34 @@ fn expr_to_ast(expr: &Expr, dialect: DatabaseDialect) -> sqlparser::ast::Expr {
         }
         Expr::Wildcard => todo!(),
         Expr::QualifiedWildcard { .. } => todo!(),
-        Expr::Exists { subquery, negated } => todo!(),
-        Expr::InSubquery { .. } => todo!(),
-        Expr::ScalarSubquery(_) => todo!(),
+        Expr::Exists { subquery, negated } => {
+            let (subquery, _) = logical_plan_to_ast(&subquery.subquery, dialect).unwrap();
+            let exists = OutExpr::Exists(Box::new(subquery));
+            if *negated {
+                OutExpr::UnaryOp {
+                    op: UnaryOperator::Not,
+                    expr: Box::new(exists),
+                }
+            } else {
+                exists
+            }
+        }
+        Expr::InSubquery {
+            expr,
+            subquery,
+            negated,
+        } => {
+            let (subquery, _) = logical_plan_to_ast(&subquery.subquery, dialect).unwrap();
+            OutExpr::InSubquery {
+                expr: Box::new(expr_to_ast(expr, dialect)),
+                subquery: Box::new(subquery),
+                negated: *negated,
+            }
+        }
+        Expr::ScalarSubquery(subquery) => {
+            let (subquery, _) = logical_plan_to_ast(&subquery.subquery, dialect).unwrap();
+            OutExpr::Subquery(Box::new(subquery))
+        }
         Expr::GroupingSet(_) => todo!(),
     }
 }
@@ -988,7 +1060,9 @@ pub fn expr_to_sql(expr: &Expr, _dialect: DatabaseDialect) -> String {
             subquery,
             negated,
         } => todo!(),
-        Expr::ScalarSubquery(_) => todo!(),
+        Expr::ScalarSubquery(subquery) => {
+            todo!()
+        }
         Expr::GroupingSet(_) => todo!(),
     }
 }
@@ -1072,8 +1146,11 @@ fn datatype_to_ast(data_type: &DataType, _dialect: DatabaseDialect) -> sqlparser
     }
 }
 
-fn join_factor_to_ast(join: &plan::Join, dialect: DatabaseDialect) -> sqlparser::ast::JoinOperator {
-    use sqlparser::ast::{JoinOperator, JoinConstraint as Constraint};
+fn join_factor_to_ast(
+    join: &plan::Join,
+    dialect: DatabaseDialect,
+) -> Result<sqlparser::ast::JoinOperator, RdbmsError> {
+    use sqlparser::ast::{JoinConstraint as Constraint, JoinOperator};
 
     // TODO: check if join columns aren't empty
     let mut join_expr = {
@@ -1088,19 +1165,84 @@ fn join_factor_to_ast(join: &plan::Join, dialect: DatabaseDialect) -> sqlparser:
     let join_expr = expr_to_ast(&join_expr, dialect);
 
     let join_constraint = match join.join_constraint {
-        JoinConstraint::On => {
-            Constraint::On(join_expr)
-        },
+        JoinConstraint::On => Constraint::On(join_expr),
         JoinConstraint::Using => todo!("JoinConstraint::Using not yet supported"),
     };
 
-    match join.join_type {
+    Ok(match join.join_type {
         JoinType::Inner => JoinOperator::Inner(join_constraint),
         JoinType::Left => JoinOperator::LeftOuter(join_constraint),
         JoinType::Right => JoinOperator::RightOuter(join_constraint),
         JoinType::Full => JoinOperator::FullOuter(join_constraint),
-        JoinType::Semi => todo!("Semi join not yet supported"),
-        JoinType::Anti => todo!("Anti join not yet supported"),
+        JoinType::Semi => {
+            return Err(RdbmsError::UnsupportedQuery(
+                "Semi-join not yet supported".to_string(),
+            ))
+        }
+        JoinType::Anti => {
+            return Err(RdbmsError::UnsupportedQuery(
+                "Anti-join not yet supported".to_string(),
+            ))
+        }
+    })
+}
+
+fn extract_datetime(expr: &Expr) -> sqlparser::ast::DateTimeField {
+    use sqlparser::ast::DateTimeField;
+    match expr {
+        Expr::Alias(_, _) => todo!(),
+        Expr::Column(_) => todo!(),
+        Expr::ScalarVariable(_, _) => todo!(),
+        Expr::Literal(datafusion::scalar::ScalarValue::Utf8(Some(value))) => match value.as_str() {
+            "YEAR" => DateTimeField::Year,
+            t => panic!("{}", t),
+        },
+        Expr::Literal(_) => todo!(),
+        Expr::BinaryExpr { .. } => todo!(),
+        Expr::Not(_) => todo!(),
+        Expr::IsNotNull(_) => todo!(),
+        Expr::IsNull(_) => todo!(),
+        Expr::Negative(_) => todo!(),
+        Expr::GetIndexedField { .. } => todo!(),
+        Expr::Between { .. } => todo!(),
+        Expr::Case { .. } => todo!(),
+        Expr::Cast { expr, data_type } => todo!(),
+        Expr::TryCast { expr, data_type } => todo!(),
+        Expr::Sort {
+            expr,
+            asc,
+            nulls_first,
+        } => todo!(),
+        Expr::ScalarFunction { fun, args } => todo!(),
+        Expr::ScalarUDF { fun, args } => todo!(),
+        Expr::AggregateFunction {
+            fun,
+            args,
+            distinct,
+        } => todo!(),
+        Expr::WindowFunction {
+            fun,
+            args,
+            partition_by,
+            order_by,
+            window_frame,
+        } => todo!(),
+        Expr::AggregateUDF { fun, args } => todo!(),
+        Expr::InList {
+            expr,
+            list,
+            negated,
+        } => todo!(),
+        Expr::Exists { subquery, negated } => todo!(),
+        Expr::InSubquery {
+            expr,
+            subquery,
+            negated,
+        } => todo!(),
+        Expr::ScalarSubquery(_) => todo!(),
+        Expr::Wildcard => todo!(),
+        Expr::QualifiedWildcard { qualifier } => todo!(),
+        Expr::GroupingSet(_) => todo!(),
     }
 }
 #[cfg(test)]
@@ -1113,6 +1255,7 @@ mod tests {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::datasource::datasource::TableProviderFilterPushDown;
     use datafusion::error::Result as DfResult;
+    use datafusion::execution::context::SessionState;
     use datafusion::logical_expr::{TableSource, TableType};
     use datafusion::logical_plan::plan::DefaultTableSource;
     use datafusion::{
@@ -1147,6 +1290,7 @@ mod tests {
 
         async fn scan(
             &self,
+            _ctx: &SessionState,
             _projection: &Option<Vec<usize>>,
             _filters: &[Expr],
             _limit: Option<usize>,
@@ -1183,24 +1327,43 @@ mod tests {
 
     #[test]
     fn test_ast() {
-        let query = "    select
-        l_returnflag,
-        l_linestatus,
-        sum(l_quantity) as sum_qty,
-        sum(l_extendedprice) as sum_base_price,
-        sum(l_extendedprice * (1 - l_discount)) as sum_disc_price,
-        sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)) as sum_charge,
-        avg(l_quantity) as avg_qty,
-        avg(l_extendedprice) as avg_price,
-        avg(l_discount) as avg_disc,
-        count(*) as count_order
+        let query = "select
+        cntrycode,
+        count(*) as numcust,
+        sum(c_acctbal) as totacctbal
     from
-        bench.public.lineitem
-    where
-        l_shipdate <= date '1998-09-02'
+        (
+            select
+                substring(c_phone from 1 for 2) as cntrycode,
+                c_acctbal
+            from
+                bench.public.customer
+            where
+                    substring(c_phone from 1 for 2) in
+                    ('13', '31', '23', '29', '30', '18', '17')
+              and c_acctbal > (
+                select
+                    avg(c_acctbal)
+                from
+                    bench.public.customer
+                where
+                        c_acctbal > 0.00
+                  and substring(c_phone from 1 for 2) in
+                      ('13', '31', '23', '29', '30', '18', '17')
+            )
+              and exists (
+                    select
+                        *
+                    from
+                        bench.public.orders
+                    where
+                            o_custkey = c_custkey
+                )
+        ) as custsale
     group by
-        l_returnflag,
-        l_linestatus";
+        cntrycode
+    order by
+        cntrycode";
         let dialect = sqlparser::dialect::PostgreSqlDialect {};
         let out = sqlparser::parser::Parser::parse_sql(&dialect, query).unwrap();
         println!("AST: {:#?}", out);
@@ -1209,10 +1372,8 @@ mod tests {
     #[test]
     fn test_join() {
         let query = "
-        select *
-        from bench.public.customer 
-        inner join bench.public.nation
-        on c_nationkey = n_nationkey
+        select a.one, a.two 
+        from table_name a
         ";
         let dialect = sqlparser::dialect::PostgreSqlDialect {};
         let out = sqlparser::parser::Parser::parse_sql(&dialect, query).unwrap();

@@ -5,7 +5,7 @@ use std::task::{Context, Poll};
 
 use datafusion::arrow::datatypes::Schema;
 use datafusion::execution::context::{QueryPlanner, SessionState, TaskContext};
-use datafusion::logical_plan::{LogicalPlan, TableScan, UserDefinedLogicalNode};
+use datafusion::logical_plan::{DFSchema, Expr, LogicalPlan, TableScan, UserDefinedLogicalNode};
 use datafusion::physical_plan::planner::{DefaultPhysicalPlanner, ExtensionPlanner};
 use datafusion::{
     arrow::{
@@ -196,8 +196,8 @@ impl ExtensionPlanner for SqlDatabaseQueryPlanner {
         // Check the custom nodes
         Ok(
             if let Some(node) = node.as_any().downcast_ref::<SqlAstPlanNode>() {
-                dbg!(&node.ast);
                 let query = node.ast.to_string();
+                let query = fix_query(&query);
                 dbg!(&query);
 
                 let schema = Schema::new_with_metadata(
@@ -214,32 +214,84 @@ impl ExtensionPlanner for SqlDatabaseQueryPlanner {
                     query,
                     schema: Arc::new(schema),
                 }))
-            } else if let Some(node) = node.as_any().downcast_ref::<SqlProjectAggregateNode>() {
-                assert_eq!(logical_inputs.len(), 1, "input size inconsistent");
-                assert_eq!(physical_inputs.len(), 1, "input size inconsistent");
-                // Extract connectino from any of the logical inputs
-                let input = logical_inputs[0];
-                let connector = if let LogicalPlan::TableScan(TableScan { ref source, .. }) = input
-                {
-                    // TODO check which type to cast to
-                    let source = source
-                        .as_any()
-                        .downcast_ref::<PostgresTableProvider>()
-                        .unwrap();
-                    source.connection().to_connector()
-                } else {
-                    return Ok(None);
-                };
-                // let schema = Arc::new(join_node.schema.as_ref().into());
-                let schema = physical_inputs[0].schema();
-                Some(Arc::new(DatabaseExec {
-                    connector,
-                    query: dbg!(node.to_sql()?),
-                    schema,
-                }))
             } else {
                 None
             },
         )
     }
+}
+
+pub struct SqlPhysicalQueryPlanner {}
+
+#[async_trait::async_trait]
+impl PhysicalPlanner for SqlPhysicalQueryPlanner {
+    // Create a physical plan from a logical plan
+    async fn create_physical_plan(
+        &self,
+        logical_plan: &LogicalPlan,
+        session_state: &SessionState,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        println!("Logical Plan:\n{:?}", logical_plan);
+        let state_cloned = session_state.clone();
+        match logical_plan {
+            LogicalPlan::Extension(extension) => {
+                let node = extension.node.as_any();
+                if let Some(node) = node.downcast_ref::<SqlAstPlanNode>() {
+                    let schema = Schema::new_with_metadata(
+                        node.schema()
+                            .fields()
+                            .iter()
+                            .map(|f| f.field().clone())
+                            .collect(),
+                        node.schema().metadata().clone(),
+                    );
+                    return Ok(Arc::new(DatabaseExec {
+                        connector: node.connector.clone(),
+                        query: fix_query(&node.ast.to_string()),
+                        schema: Arc::new(schema),
+                    }));
+                } else {
+                    panic!()
+                }
+            }
+            _ => state_cloned.create_physical_plan(logical_plan).await,
+        }
+    }
+
+    /// Create a physical expression from a logical expression
+    /// suitable for evaluation
+    ///
+    /// `expr`: the expression to convert
+    ///
+    /// `input_dfschema`: the logical plan schema for evaluating `expr`
+    ///
+    /// `input_schema`: the physical schema for evaluating `expr`
+    fn create_physical_expr(
+        &self,
+        expr: &Expr,
+        input_dfschema: &DFSchema,
+        input_schema: &Schema,
+        session_state: &SessionState,
+    ) -> DFResult<Arc<dyn PhysicalExpr>> {
+        panic!()
+    }
+}
+
+/// Utility function to fix SQL queries' expressions that are invalid.
+/// Exmaple: `Uint64(x)` -> `x`
+fn fix_query(query: &str) -> String {
+    let re_int64 = regex::Regex::new(r"Int64\((?P<value>\d+)\)").unwrap();
+    let re_uint64 = regex::Regex::new(r"Uint64\((?P<value>\d+)\)").unwrap();
+    let re_l_lit = regex::Regex::new(r"(?P<value>\d+)L").unwrap();
+    let query = re_int64.replace_all(query, "$value").to_string();
+    let query = re_uint64.replace_all(&query, "$value");
+    let query = re_l_lit.replace_all(&query, "$value");
+    query.to_string()
+}
+
+#[test]
+fn test_fix_query() {
+    let query = "select Int64(1), Int64(100), Uint64(1000), 1L";
+    let fixed = fix_query(query);
+    assert_eq!(&fixed, "select 1, 100, 1000, 1")
 }
