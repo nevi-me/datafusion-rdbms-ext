@@ -93,6 +93,7 @@ pub fn pg_to_arrow_type(dt: &Type) -> Option<DataType> {
     }
 }
 
+#[allow(unused)]
 /// Generate Arrow schema from a row
 pub fn row_to_schema(row: &Row) -> Result<Schema, ()> {
     let fields = row
@@ -123,6 +124,7 @@ pub fn info_schema_table_to_schema(rows: Vec<Row>) -> Result<Schema, ()> {
     Ok(Schema::new(fields?))
 }
 
+#[allow(unused)]
 struct PgDataType {
     column_name: String,
     ordinal_position: i32,

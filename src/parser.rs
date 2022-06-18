@@ -15,11 +15,6 @@ use crate::node::SqlAstPlanNode;
 use crate::sqldb::postgres::table_provider::PostgresTableProvider;
 use crate::sqldb::DatabaseConnector;
 
-pub struct LogicalPlanExt {
-    plan: LogicalPlan,
-    dialect: DatabaseDialect,
-}
-
 #[derive(Copy, Clone, Debug)]
 pub enum DatabaseDialect {
     Generic,
@@ -28,17 +23,6 @@ pub enum DatabaseDialect {
     // MySql,
     // Oracle,
 }
-
-// /// A trait to convert a logical plan to SQL
-// pub trait LogicalPlanSqlExt {
-//     fn to_sql(&self) -> DfResult<String>;
-// }
-
-// impl LogicalPlanSqlExt for LogicalPlanExt {
-//     fn to_sql(&self) -> DfResult<String> {
-//         logical_plan_to_sql(&self.plan, self.dialect)
-//     }
-// }
 
 /// Converts a logical plan to SQL AST
 pub fn logical_plan_to_ast(
@@ -69,6 +53,7 @@ pub fn logical_plan_to_ast(
                                 distinct,
                             } = e
                             {
+                                dbg!(fun, distinct);
                                 println!("Aggr: {}", expr_inner_name(&args[0]));
                             }
                             println!("Aggregate: {}", e.to_string().replace('#', ""));
@@ -137,7 +122,7 @@ pub fn logical_plan_to_ast(
                                                 let key = ex.to_string().replace('#', "");
                                                 println!(
                                                     "Aliased expr: {key}, e: {}",
-                                                    e.to_string().replace("#", "")
+                                                    e.to_string().replace('#', "")
                                                 );
                                                 match inner_agg_expr.get(&key) {
                                                     Some(aliased) => expr_to_select_item(
@@ -166,7 +151,7 @@ pub fn logical_plan_to_ast(
                                                 .collect(),
                                         ),
                                         alias: None,
-                                        args: vec![],
+                                        args: None,
                                         with_hints: vec![],
                                     },
                                     joins: vec![],
@@ -454,13 +439,13 @@ pub fn logical_plan_to_ast(
                     .collect()
             };
             // TODO: complete the selection
-            let selection: Option<()> = if scan.filters.is_empty() {
-                None
-            } else {
-                let mut filter_iter = scan.filters.iter();
-                Some(scan.filters.iter().map(|filter| {}));
-                todo!();
-            };
+            // let selection: Option<()> = if scan.filters.is_empty() {
+            //     None
+            // } else {
+            //     let mut filter_iter = scan.filters.iter();
+            //     Some(scan.filters.iter().map(|filter| {}));
+            //     todo!();
+            // };
             (
                 Query {
                     with: None,
@@ -480,7 +465,7 @@ pub fn logical_plan_to_ast(
                                         .collect(),
                                 ),
                                 alias: None,
-                                args: vec![],
+                                args: None,
                                 with_hints: vec![],
                             },
                             joins: vec![],
@@ -545,13 +530,10 @@ pub fn logical_plan_to_ast(
                                 columns: vec![],
                             })
                         }
-                        TableFactor::Derived {
-                            lateral,
-                            subquery,
-                            alias,
-                        } => todo!(),
-                        TableFactor::TableFunction { expr, alias } => todo!(),
+                        TableFactor::Derived { .. } => todo!(),
+                        TableFactor::TableFunction { .. } => todo!(),
                         TableFactor::NestedJoin(_) => todo!(),
+                        TableFactor::UNNEST { .. } => todo!(),
                     },
                     None => panic!(),
                 },
@@ -594,7 +576,7 @@ fn expr_to_ast(expr: &Expr, dialect: DatabaseDialect) -> sqlparser::ast::Expr {
     use datafusion::scalar::ScalarValue;
     use sqlparser::ast::Expr as OutExpr;
     use sqlparser::ast::{
-        BinaryOperator, Function, FunctionArg, FunctionArgExpr, Ident, UnaryOperator, Value,
+        BinaryOperator, Function, FunctionArg, FunctionArgExpr, UnaryOperator, Value,
     };
     match expr {
         Expr::Alias(expr, _) => {
@@ -1272,32 +1254,6 @@ mod tests {
             unimplemented!("We do not test scans")
         }
     }
-
-    // #[test]
-    // fn test_tablescan_sql() {
-    //     let fields = vec![
-    //         Field::new("a", DataType::Int32, true),
-    //         Field::new("b", DataType::Utf8, true),
-    //     ];
-    //     let schema = Schema::new(fields);
-    //     let plan = LogicalPlanBuilder::scan_empty(Some("test_table"), &schema, None)
-    //         .unwrap()
-    //         .filter(col("a").lt(lit(100i32)).or(col("b").is_not_null()))
-    //         .unwrap()
-    //         .build()
-    //         .unwrap();
-
-    //     let plan_ext = LogicalPlanExt {
-    //         plan,
-    //         dialect: DatabaseDialect::Generic,
-    //     };
-
-    //     let sql = plan_ext.to_sql().unwrap();
-    //     assert_eq!(
-    //         "SELECT * FROM (SELECT * FROM test_table) tbl_a WHERE (a < 100 OR b IS NOT NULL)",
-    //         &sql
-    //     );
-    // }
 
     #[test]
     fn test_ast() {

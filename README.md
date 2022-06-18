@@ -18,23 +18,20 @@ Should I be able to progress with this, my goals would be to allow:
 - [ ] Connecting DF to a SQL server, and letting it generate a catalog from schemas and tables
   - This is working for PostgreSQL, we rely on the `INFORMATION_SCHEMA` catalog
 - [ ] Accessing tables in the normal `LogicalPlan::TableScan` fashion, with filter and projection pushdown
-  - Partially working for PostgreSQL, filter predicates are somehow not working yet
-- [ ] Custom logical and physical nodes/extensions to recognise when plans that could be pushed to the database, can be.
-  - [ ] Aggregations and window functions, as these can significantly reduce the volume of data coming from the source
-  - [ ] Joins between tables in the same database (or server in MSSQL case)
-    - Joins are partially working, but have to iron out issues and find better ways of writing SQL
+  - Most common filters work, but advanced ones like subquery filters don't yet work
+- [ ] AST-based planner that rewrites parts of the `LogicalPlan` into SQL queries
 - [ ] Some offline/online gathering of statistics to aid with choosing when to read & compute on DF vs on the DB
 
 ## Target Databases
 
 It is tedious to write connectors for every database out there, I've previously tried.
-Arrow has Flight SQL, which could be a first-class citizen for connections. While databases do not yet support it, I could leverage `connector-x` or some of my old SQL->Arrow work.
+Arrow has Flight SQL, which could be a first-class citizen for connections. While databases do not yet support it, so non-trivial amount of work might be required to connect to databases.
 
 ## What's Working?
 
-Nothing. I mostly have code from the DataFusion TopK planner, which I've been converting to support my desired use-case.
-There's some changes needed in DF, such as being able to specify a table source so we can know if we're reading from a DB or flat file.
+Basic queries. There are a few changes needed on DataFusion to make the code work. These are tracked on my fork, as they don't yet make sense to upstream.
 
+AST-based rewrite works for some queries, but still requires significant work.
 ### TPC-H Derived Queries
 
 There are some general blockers affecting the pushing down of some TPC-H derived queries.

@@ -6,6 +6,7 @@ use std::{
 use datafusion::{catalog, datasource::TableProvider, error::*};
 
 pub struct DatabaseCatalog {
+    #[allow(unused)]
     database_name: String,
     schemas: RwLock<HashMap<String, Arc<dyn catalog::schema::SchemaProvider>>>,
 }
@@ -46,6 +47,7 @@ impl catalog::catalog::CatalogProvider for DatabaseCatalog {
 
 pub struct SchemaCatalog {
     // TODO: this might not be needed, I left it here in case there's use for it
+    #[allow(unused)]
     schema_name: String,
     tables: RwLock<HashMap<String, Arc<dyn TableProvider>>>,
 }

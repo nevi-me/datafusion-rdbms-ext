@@ -5,7 +5,7 @@ use std::task::{Context, Poll};
 
 use datafusion::arrow::datatypes::Schema;
 use datafusion::execution::context::{QueryPlanner, SessionState, TaskContext};
-use datafusion::logical_plan::{DFSchema, Expr, LogicalPlan, TableScan, UserDefinedLogicalNode};
+use datafusion::logical_plan::{DFSchema, Expr, LogicalPlan, UserDefinedLogicalNode};
 use datafusion::physical_plan::planner::{DefaultPhysicalPlanner, ExtensionPlanner};
 use datafusion::{
     arrow::{
@@ -18,11 +18,9 @@ use datafusion::{
     physical_plan::{expressions::PhysicalSortExpr, *},
 };
 use futures_util::{Stream, StreamExt};
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::node::*;
-use crate::sqldb::postgres::table_provider::PostgresTableProvider;
 use crate::sqldb::{DatabaseConnection, DatabaseConnector};
 
 /// Physical operator that executes a database query
@@ -74,14 +72,9 @@ impl ExecutionPlan for DatabaseExec {
     /// Execute one partition and return an iterator over RecordBatch
     fn execute(
         &self,
-        partition: usize,
-        context: Arc<TaskContext>,
+        _partition: usize,
+        _context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
-        let (response_tx, response_rx): (
-            Sender<ArrowResult<RecordBatch>>,
-            Receiver<ArrowResult<RecordBatch>>,
-        ) = channel(2000);
-
         let connector = self.connector.clone();
         let query = self.query.clone();
         let schema = self.schema();
@@ -187,11 +180,11 @@ impl QueryPlanner for SqlDatabaseQueryPlanner {
 impl ExtensionPlanner for SqlDatabaseQueryPlanner {
     fn plan_extension(
         &self,
-        planner: &dyn PhysicalPlanner,
+        _planner: &dyn PhysicalPlanner,
         node: &dyn UserDefinedLogicalNode,
-        logical_inputs: &[&LogicalPlan],
-        physical_inputs: &[Arc<dyn ExecutionPlan>],
-        session_state: &SessionState,
+        _logical_inputs: &[&LogicalPlan],
+        _physical_inputs: &[Arc<dyn ExecutionPlan>],
+        _session_state: &SessionState,
     ) -> DFResult<Option<Arc<dyn ExecutionPlan>>> {
         // Check the custom nodes
         Ok(
@@ -268,10 +261,10 @@ impl PhysicalPlanner for SqlPhysicalQueryPlanner {
     /// `input_schema`: the physical schema for evaluating `expr`
     fn create_physical_expr(
         &self,
-        expr: &Expr,
-        input_dfschema: &DFSchema,
-        input_schema: &Schema,
-        session_state: &SessionState,
+        _expr: &Expr,
+        _input_dfschema: &DFSchema,
+        _input_schema: &Schema,
+        _session_state: &SessionState,
     ) -> DFResult<Arc<dyn PhysicalExpr>> {
         panic!()
     }
