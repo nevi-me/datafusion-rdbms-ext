@@ -244,7 +244,17 @@ fn supports_filter_pushdown(filter: &Expr) -> FPD {
         Expr::Column(_) => FPD::Exact,
         Expr::ScalarVariable(_, _) => FPD::Unsupported,
         Expr::Literal(_) => FPD::Exact,
-        Expr::BinaryExpr { .. } => FPD::Exact,
+        Expr::BinaryExpr { left, right, .. } => {
+            let left = supports_filter_pushdown(left);
+            let right = supports_filter_pushdown(right);
+            match (left, right) {
+                (FPD::Unsupported, _) => FPD::Unsupported,
+                (_, FPD::Unsupported) => FPD::Unsupported,
+                (FPD::Inexact, _) => FPD::Inexact,
+                (_, FPD::Inexact) => FPD::Inexact,
+                (FPD::Exact, FPD::Exact) => FPD::Exact,
+            }
+        }
         Expr::Not(expr) => supports_filter_pushdown(expr),
         Expr::IsNotNull(expr) => supports_filter_pushdown(expr),
         Expr::IsNull(expr) => supports_filter_pushdown(expr),
@@ -288,9 +298,9 @@ fn supports_filter_pushdown(filter: &Expr) -> FPD {
         Expr::InList { .. } => FPD::Exact,
         Expr::Wildcard => FPD::Unsupported,
         Expr::QualifiedWildcard { .. } => FPD::Unsupported,
-        Expr::Exists { .. } => todo!(),
-        Expr::InSubquery { .. } => todo!(),
-        Expr::ScalarSubquery(_) => todo!(),
-        Expr::GroupingSet(_) => todo!(),
+        Expr::Exists { .. } => FPD::Unsupported,
+        Expr::InSubquery { .. } => FPD::Unsupported,
+        Expr::ScalarSubquery(_) => FPD::Unsupported,
+        Expr::GroupingSet(_) => FPD::Unsupported,
     }
 }
