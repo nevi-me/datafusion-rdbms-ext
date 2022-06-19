@@ -46,44 +46,50 @@ Here is a list of the queries, that shows which tests pass, or what is missing.
   - [x] Accurate result
   - Relies on fixing query with regex
 - [ ] Q2
-  - `ScalarSubquery` not supported in `expr_to_sql`
+  - Physical plan does not support logical expression subquery
 - [x] Q3
 - [ ] Q4
   - Error: `Execution("DateIntervalExpr does not support IntervalYearMonth")`
-- [X] Q5
-- [-] Q6
+- [x] Q5
+- [ ] Q6
   - [x] Passes
   - [ ] Accurate result
+    - Float64 rounding issue when passing down query (check other data sources)
 - [ ] Q7
+  - We should not use `SelectItem::UnnamedExpr`
 - [ ] Q8
-  - Query parser error
+  - Ambiguous column name `n_nationkey`
 - [ ] Q9
-  - Query parser error
-- [-] Q10
-  - [X] Passes
-  - [ ] Accurate result
+  - Column name `o_year` does not exist
+- [x] Q10
+  - [x] Passes
+  - [x] Accurate result
 - [ ] Q11
-   - Physical plan does not support logical expression subquery
+  - Physical plan does not support logical expression subquery
 - [ ] Q12
+  - String literal interpreted as column name
 - [ ] Q13
 - [ ] Q14
   - String literal interpreted as column name
 - [ ] Q15
   - DataFusion context only supports a single statement
-- [ ] Q16
-  - HashJoin error on `equal_rows_elem!(Int64Array, l, r, left, right, null_equals_null)`
+- [x] Q16
+  - Can be improved by supporting anti-join pushdown
 - [ ] Q17
   - `ScalarSubquery` not supported in `expr_to_sql`
 - [ ] Q18
   - `group by x having y` is not parsed correctly
+  - complete column rename work
 - [ ] Q19
   - DF creates a cross join, not yet supported in parser
   - `ScalarSubquery` not supported in `expr_to_sql`
+  - We should not use `SelectItem::UnnamedExpr`
 - [ ] Q20
    - Physical plan does not support logical expression subquery
 - [ ] Q21
   - Requires `Expr::Exists` to be supported by physical planner (should be possible to bypass this)
 - [ ] Q22
+  - We should not use `SelectItem::UnnamedExpr`
 
 
 ## Counter-Points

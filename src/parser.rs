@@ -15,6 +15,13 @@ use crate::node::SqlAstPlanNode;
 use crate::sqldb::postgres::table_provider::PostgresTableProvider;
 use crate::sqldb::DatabaseConnector;
 
+pub struct LogicalPlanAst {
+    /// The AST query generated from the logical plan
+    pub query: sqlparser::ast::Query,
+    /// The extracted database connector for the query
+    pub connector: DatabaseConnector,
+}
+
 #[derive(Copy, Clone, Debug)]
 pub enum DatabaseDialect {
     Generic,
@@ -24,61 +31,40 @@ pub enum DatabaseDialect {
     // Oracle,
 }
 
+macro_rules! unsupported_plan {
+    ($($arg:tt)*) => {
+        return Err(RdbmsError::UnsupportedQuery(format!("Unsupported query from plan {:?}", $($arg)*)))
+    };
+}
+
 /// Converts a logical plan to SQL AST
 pub fn logical_plan_to_ast(
     plan: &LogicalPlan,
+    renamed_columns: &mut HashMap<String, String>,
     dialect: DatabaseDialect,
-) -> Result<(sqlparser::ast::Query, DatabaseConnector), RdbmsError> {
+) -> Result<LogicalPlanAst, RdbmsError> {
     use datafusion::logical_plan::Expr as InExpr;
     use sqlparser::ast::*;
-    println!(
-        "------------------------\nPlan to AST input:\n{:#?}\n------------------------",
-        plan
-    );
+    // println!(
+    //     "------------------------\nPlan to AST input:\n{:#?}\n------------------------",
+    //     plan
+    // );
     Ok(match plan {
         LogicalPlan::Projection(outer_project) => {
             if let LogicalPlan::Aggregate(agg) = &*outer_project.input {
                 if let LogicalPlan::Projection(inner_project) = &*agg.input {
                     if let LogicalPlan::TableScan(scan) = &*inner_project.input {
-                        // Collect the names from the external projection
-                        for e in &inner_project.expr {
-                            println!("Inner project: {}", e.to_string().replace('#', ""));
-                        }
-                        for e in &agg.aggr_expr {
-                            if let InExpr::Alias(_, alias) = e {
-                                println!("Alias: {}", alias);
-                            } else if let InExpr::AggregateFunction {
-                                fun,
-                                args,
-                                distinct,
-                            } = e
-                            {
-                                dbg!(fun, distinct);
-                                println!("Aggr: {}", expr_inner_name(&args[0]));
-                            }
-                            println!("Aggregate: {}", e.to_string().replace('#', ""));
-                        }
-                        for e in &outer_project.expr {
-                            println!("Outer project: {}", e.to_string().replace('#', ""));
-                        }
-                        // panic!();
                         let inner_agg_expr = agg
                             .aggr_expr
                             .iter()
-                            .map(|e| {
-                                println!("Expr name: {:?}", e.to_string().replace('#', ""));
-                                match e {
-                                    InExpr::Alias(ex, alias) => {
-                                        let key = alias.replace('#', "");
-                                        println!("inner key (a): {},\n\t\tvalue: {}\n", key, ex);
-                                        (key, ex.clone())
-                                    }
-                                    _ => {
-                                        // println!("Extracted name: {}", expr_inner_name(e));
-                                        let key = e.to_string().replace('#', "");
-                                        println!("inner key: {},\n\t\tvalue: {}\n", key, e);
-                                        (key, Box::new(e.clone()))
-                                    }
+                            .map(|e| match e {
+                                InExpr::Alias(ex, alias) => {
+                                    let key = alias.replace('#', "");
+                                    (key, ex.clone())
+                                }
+                                _ => {
+                                    let key = e.to_string().replace('#', "");
+                                    (key, Box::new(e.clone()))
                                 }
                             })
                             .collect::<HashMap<_, _>>();
@@ -87,13 +73,29 @@ pub fn logical_plan_to_ast(
                         for expr in &outer_project.expr {
                             if let InExpr::Alias(e, alias) = expr {
                                 let key = e.to_string().replace('#', "");
-                                println!("Outer key: {}, value: {}", key, alias);
                                 outer_agg_expr.insert(key, (alias.to_owned(), e.clone()));
                             }
                         }
 
                         // Extract connection
                         let TableScan { ref source, .. } = scan;
+                        let selection = if scan.filters.is_empty() {
+                            None
+                        } else {
+                            let mut filters = scan.filters.iter();
+                            let f = filters.next().unwrap();
+                            let mut expr = expr_to_ast(f, dialect);
+                            for f in filters {
+                                // Chain with `AND`
+                                // TODO: what happens with `OR` filters?
+                                expr = Expr::BinaryOp {
+                                    left: Box::new(expr),
+                                    op: BinaryOperator::And,
+                                    right: Box::new(expr_to_ast(f, dialect)),
+                                }
+                            }
+                            Some(expr)
+                        };
                         let connector = {
                             // TODO check which type to cast to
                             let source = source
@@ -120,10 +122,6 @@ pub fn logical_plan_to_ast(
                                         match e {
                                             InExpr::Alias(ex, alias) => {
                                                 let key = ex.to_string().replace('#', "");
-                                                println!(
-                                                    "Aliased expr: {key}, e: {}",
-                                                    e.to_string().replace('#', "")
-                                                );
                                                 match inner_agg_expr.get(&key) {
                                                     Some(aliased) => expr_to_select_item(
                                                         &InExpr::Alias(
@@ -158,7 +156,7 @@ pub fn logical_plan_to_ast(
                                 }],
                                 into: None,
                                 lateral_views: vec![],
-                                selection: None, //
+                                selection,
                                 group_by: agg
                                     .group_expr
                                     .iter()
@@ -176,12 +174,15 @@ pub fn logical_plan_to_ast(
                             fetch: None,
                             lock: None,
                         };
-                        return Ok((query, connector));
+                        return Ok(LogicalPlanAst { query, connector });
                     }
                 }
             } else if let LogicalPlan::Join(_) = &*outer_project.input {
                 // A join with a select
-                let (mut join, connector) = logical_plan_to_ast(&outer_project.input, dialect)?;
+                let LogicalPlanAst {
+                    query: mut join,
+                    connector,
+                } = logical_plan_to_ast(&outer_project.input, renamed_columns, dialect)?;
                 let projection = outer_project
                     .expr
                     .iter()
@@ -194,16 +195,50 @@ pub fn logical_plan_to_ast(
                     }
                     _ => panic!(),
                 }
-                return Ok((join, connector));
+                return Ok(LogicalPlanAst {
+                    query: join,
+                    connector,
+                });
             }
-            let mut inner_query = logical_plan_to_ast(&outer_project.input, dialect)?;
-            match inner_query.0.body.borrow_mut() {
+            let mut inner_query =
+                logical_plan_to_ast(&outer_project.input, renamed_columns, dialect)?;
+            // Cache aggregate columns' names
+
+            match inner_query.query.body.borrow_mut() {
                 SetExpr::Select(select) => {
-                    select.projection = outer_project
-                        .expr
-                        .iter()
-                        .map(|e| expr_to_select_item(e, dialect))
-                        .collect()
+                    // There's a function that is unnamed here, but it gets lost
+                    // when we replace the whole projection.
+                    let mut outer_projection = vec![];
+                    outer_project.expr.iter().for_each(|e| {
+                        match e {
+                            InExpr::Alias(_, name) => {
+                                // Find exprwithalias from select.projection
+                                select.projection.iter().for_each(|ee| {
+                                    match ee {
+                                        SelectItem::UnnamedExpr(_) => todo!("We should not allow unnamed expressions, but alias them internally"),
+                                        SelectItem::ExprWithAlias { expr, alias } => {
+                                            // Look up the alias name, remove it
+                                            let generated_alias = renamed_columns.remove(&alias.value);
+                                            match generated_alias {
+                                                Some(_) => {
+                                                    // Alias was found, replace it
+                                                    outer_projection.push(SelectItem::ExprWithAlias { expr: expr.clone(), alias: Ident { value: name.clone(), quote_style: None } })
+                                                },
+                                                None => {
+                                                    // alias was not found, fall back
+                                                    outer_projection.push(expr_to_select_item(e, dialect));
+                                                },
+                                            }
+                                        },
+                                        SelectItem::QualifiedWildcard(_) => outer_projection.push(expr_to_select_item(e, dialect)),
+                                        SelectItem::Wildcard => outer_projection.push(expr_to_select_item(e, dialect)),
+                                    }
+                                });
+                            },
+                            _ => outer_projection.push(expr_to_select_item(e, dialect)),
+                        }
+                    });
+                    select.projection = outer_projection;
                 }
                 SetExpr::Query(query) => {
                     // I know that the projection > tablescan only projects because
@@ -217,9 +252,9 @@ pub fn logical_plan_to_ast(
                 SetExpr::Values(_) => todo!(),
                 SetExpr::Insert(_) => todo!(),
             }
-            let body = SetExpr::Query(Box::new(inner_query.0));
-            (
-                Query {
+            let body = SetExpr::Query(Box::new(inner_query.query));
+            LogicalPlanAst {
+                query: Query {
                     with: None,
                     body,
                     order_by: vec![],
@@ -228,14 +263,17 @@ pub fn logical_plan_to_ast(
                     fetch: None,
                     lock: None,
                 },
-                inner_query.1,
-            )
+                connector: inner_query.connector,
+            }
         }
         LogicalPlan::Filter(filter) => {
             // A filter can loosely be expressed as "select * from input where {predicate}"
             // While this nests a table select, we ordinarily expect to generate SQL code
             // from an already optimised LogicalPlan, so this should not be a common occurrence
-            let (mut query, connector) = logical_plan_to_ast(&filter.input, dialect)?;
+            let LogicalPlanAst {
+                mut query,
+                connector,
+            } = logical_plan_to_ast(&filter.input, renamed_columns, dialect)?;
             match query.body.borrow_mut() {
                 SetExpr::Select(select) => {
                     select.selection = Some(expr_to_ast(&filter.predicate, dialect))
@@ -246,16 +284,24 @@ pub fn logical_plan_to_ast(
                     ))
                 }
             }
-            return Ok((query, connector));
+            return Ok(LogicalPlanAst { query, connector });
         }
-        LogicalPlan::Window(_) => todo!(),
+        LogicalPlan::Window(_) => unsupported_plan!(plan),
         LogicalPlan::Aggregate(aggregate) => {
-            let (mut input, connector) = logical_plan_to_ast(&aggregate.input, dialect)?;
+            let LogicalPlanAst {
+                query: mut input,
+                connector,
+            } = logical_plan_to_ast(&aggregate.input, renamed_columns, dialect)?;
             // Edit the query body
             let projection = aggregate
                 .aggr_expr
                 .iter()
-                .map(|expr| expr_to_select_item(expr, dialect))
+                .map(|expr| {
+                    let col_name = generate_column_name(renamed_columns.len());
+                    let alias = expr.clone().alias(&col_name);
+                    renamed_columns.insert(col_name, expr.name(&aggregate.schema).unwrap());
+                    expr_to_select_item(&alias, dialect)
+                })
                 .collect::<Vec<_>>();
             let group_by = aggregate
                 .group_expr
@@ -279,10 +325,16 @@ pub fn logical_plan_to_ast(
                 SetExpr::Values(_) => todo!(),
                 SetExpr::Insert(_) => todo!(),
             };
-            (input, connector)
+            LogicalPlanAst {
+                query: input,
+                connector,
+            }
         }
         LogicalPlan::Sort(sort) => {
-            let (mut input, connector) = logical_plan_to_ast(&sort.input, dialect)?;
+            let LogicalPlanAst {
+                query: mut input,
+                connector,
+            } = logical_plan_to_ast(&sort.input, renamed_columns, dialect)?;
             let sort_exprs = sort
                 .expr
                 .iter()
@@ -304,12 +356,19 @@ pub fn logical_plan_to_ast(
                 })
                 .collect::<DfResult<Vec<_>>>();
             input.order_by = sort_exprs.unwrap();
-            (input, connector)
+            LogicalPlanAst {
+                query: input,
+                connector,
+            }
         }
         LogicalPlan::Join(join) => {
             let join_operator = join_factor_to_ast(join, dialect)?;
-            let (mut left, connector) = logical_plan_to_ast(&join.left, dialect)?;
-            let (right, _) = logical_plan_to_ast(&join.right, dialect)?;
+            let LogicalPlanAst {
+                query: mut left,
+                connector,
+            } = logical_plan_to_ast(&join.left, renamed_columns, dialect)?;
+            let LogicalPlanAst { query: right, .. } =
+                logical_plan_to_ast(&join.right, renamed_columns, dialect)?;
             let body = match (left.body.borrow_mut(), right.body) {
                 (SetExpr::Select(left_select), SetExpr::Select(right_select)) => {
                     let mut from = left_select.from[0].clone();
@@ -318,6 +377,18 @@ pub fn logical_plan_to_ast(
                         join_operator,
                     });
                     left_select.from[0] = from;
+                    // Extend the selection with filters from right
+                    left_select.selection = match (&left_select.selection, &right_select.selection)
+                    {
+                        (None, None) => None,
+                        (None, Some(right)) => Some(right.clone()),
+                        (Some(left), None) => Some(left.clone()),
+                        (Some(left), Some(right)) => Some(Expr::BinaryOp {
+                            left: Box::new(left.clone()),
+                            op: BinaryOperator::And,
+                            right: Box::new(right.clone()),
+                        }),
+                    };
                     // Add columns from right
                     // TODO: this could be simplified to a Wildcard
                     left_select
@@ -335,11 +406,11 @@ pub fn logical_plan_to_ast(
                 // SetExpr::Values(_) => todo!(),
                 // SetExpr::Insert(_) => todo!(),
                 _ => {
-                    todo!("non-select joins not implemented")
+                    unsupported_plan!(plan)
                 }
             };
-            (
-                Query {
+            LogicalPlanAst {
+                query: Query {
                     with: None,
                     body: SetExpr::Select(body),
                     order_by: vec![],
@@ -349,11 +420,15 @@ pub fn logical_plan_to_ast(
                     lock: None,
                 },
                 connector,
-            )
+            }
         }
         LogicalPlan::CrossJoin(cross_join) => {
-            let (mut left, connector) = logical_plan_to_ast(&cross_join.left, dialect)?;
-            let (right, _) = logical_plan_to_ast(&cross_join.right, dialect)?;
+            let LogicalPlanAst {
+                query: mut left,
+                connector,
+            } = logical_plan_to_ast(&cross_join.left, renamed_columns, dialect)?;
+            let LogicalPlanAst { query: right, .. } =
+                logical_plan_to_ast(&cross_join.right, renamed_columns, dialect)?;
             let body = match (left.body.borrow_mut(), right.body) {
                 (SetExpr::Select(left_select), SetExpr::Select(right_select)) => {
                     let mut from = left_select.from[0].clone();
@@ -379,11 +454,11 @@ pub fn logical_plan_to_ast(
                 // SetExpr::Values(_) => todo!(),
                 // SetExpr::Insert(_) => todo!(),
                 _ => {
-                    todo!("non-select joins not implemented")
+                    unsupported_plan!(plan)
                 }
             };
-            (
-                Query {
+            LogicalPlanAst {
+                query: Query {
                     with: None,
                     body: SetExpr::Select(body),
                     order_by: vec![],
@@ -393,10 +468,10 @@ pub fn logical_plan_to_ast(
                     lock: None,
                 },
                 connector,
-            )
+            }
         }
-        LogicalPlan::Repartition(_) => todo!(),
-        LogicalPlan::Union(_) => todo!(),
+        LogicalPlan::Repartition(_) => unsupported_plan!(plan),
+        LogicalPlan::Union(_) => unsupported_plan!(plan),
         LogicalPlan::TableScan(scan) => {
             // Table scans only make sense when dealing with an expected data source.
             // An expected source would first be a RDBMS, and have the same dialect as
@@ -438,16 +513,25 @@ pub fn logical_plan_to_ast(
                     })
                     .collect()
             };
-            // TODO: complete the selection
-            // let selection: Option<()> = if scan.filters.is_empty() {
-            //     None
-            // } else {
-            //     let mut filter_iter = scan.filters.iter();
-            //     Some(scan.filters.iter().map(|filter| {}));
-            //     todo!();
-            // };
-            (
-                Query {
+            let selection = if scan.filters.is_empty() {
+                None
+            } else {
+                let mut filters = scan.filters.iter();
+                let f = filters.next().unwrap();
+                let mut expr = expr_to_ast(f, dialect);
+                for f in filters {
+                    // Chain with `AND`
+                    // TODO: what happens with `OR` filters?
+                    expr = Expr::BinaryOp {
+                        left: Box::new(expr),
+                        op: BinaryOperator::And,
+                        right: Box::new(expr_to_ast(f, dialect)),
+                    }
+                }
+                Some(expr)
+            };
+            LogicalPlanAst {
+                query: Query {
                     with: None,
                     body: SetExpr::Select(Box::new(Select {
                         distinct: false,
@@ -473,7 +557,7 @@ pub fn logical_plan_to_ast(
                         into: None,
                         qualify: None,
                         lateral_views: vec![],
-                        selection: None,
+                        selection,
                         group_by: vec![],
                         cluster_by: vec![],
                         distribute_by: vec![],
@@ -487,37 +571,46 @@ pub fn logical_plan_to_ast(
                     lock: None,
                 },
                 connector,
-            )
+            }
         }
-        LogicalPlan::EmptyRelation(_) => todo!(),
+        LogicalPlan::EmptyRelation(_) => unsupported_plan!(plan),
         LogicalPlan::Limit(limit) => {
-            let (mut input, connector) = logical_plan_to_ast(&limit.input, dialect)?;
-            input.limit = limit
+            let LogicalPlanAst {
+                mut query,
+                connector,
+            } = logical_plan_to_ast(&limit.input, renamed_columns, dialect)?;
+            query.limit = limit
                 .fetch
                 .map(|fetch| Expr::Value(Value::Number(fetch.to_string(), false)));
-            input.offset = limit.skip.map(|skip| Offset {
+            query.offset = limit.skip.map(|skip| Offset {
                 value: Expr::Value(Value::Number(skip.to_string(), false)),
                 rows: OffsetRows::None,
             });
-            (input, connector)
+            LogicalPlanAst { query, connector }
         }
-        LogicalPlan::CreateExternalTable(_) => todo!(),
-        LogicalPlan::CreateMemoryTable(_) => todo!(),
-        LogicalPlan::DropTable(_) => todo!(),
+        LogicalPlan::CreateExternalTable(_) => unsupported_plan!(plan),
+        LogicalPlan::CreateMemoryTable(_) => unsupported_plan!(plan),
+        LogicalPlan::DropTable(_) => unsupported_plan!(plan),
         LogicalPlan::Values(_) => todo!(),
-        LogicalPlan::Explain(_) => todo!(),
-        LogicalPlan::Analyze(_) => todo!(),
+        LogicalPlan::Explain(_) => unsupported_plan!(plan),
+        LogicalPlan::Analyze(_) => unsupported_plan!(plan),
         LogicalPlan::Extension(extension) => {
             if let Some(node) = extension.node.as_any().downcast_ref::<SqlAstPlanNode>() {
-                (node.ast.clone(), node.connector.clone())
+                LogicalPlanAst {
+                    query: node.ast.clone(),
+                    connector: node.connector.clone(),
+                }
             } else {
                 panic!()
             }
         }
-        LogicalPlan::CreateCatalogSchema(_) => todo!(),
+        LogicalPlan::CreateCatalogSchema(_) => unsupported_plan!(plan),
         LogicalPlan::SubqueryAlias(subquery_alias) => {
             // Table with alias
-            let (mut query, connector) = logical_plan_to_ast(&subquery_alias.input, dialect)?;
+            let LogicalPlanAst {
+                mut query,
+                connector,
+            } = logical_plan_to_ast(&subquery_alias.input, renamed_columns, dialect)?;
             match query.body.borrow_mut() {
                 SetExpr::Select(select) => match select.from.get_mut(0) {
                     Some(from) => match from.relation.borrow_mut() {
@@ -539,11 +632,11 @@ pub fn logical_plan_to_ast(
                 },
                 _ => panic!(),
             }
-            return Ok((query, connector));
+            return Ok(LogicalPlanAst { query, connector });
         }
-        LogicalPlan::CreateCatalog(_) => todo!(),
+        LogicalPlan::CreateCatalog(_) => unsupported_plan!(plan),
         LogicalPlan::Subquery(_) => todo!(),
-        LogicalPlan::CreateView(_) => todo!(),
+        LogicalPlan::CreateView(_) => unsupported_plan!(plan),
     })
 }
 
@@ -636,7 +729,12 @@ fn expr_to_ast(expr: &Expr, dialect: DatabaseDialect) -> sqlparser::ast::Expr {
                 ScalarValue::Binary(_) => todo!(),
                 ScalarValue::LargeBinary(_) => todo!(),
                 ScalarValue::List(_, _) => todo!(),
-                ScalarValue::Date32(_) => todo!(),
+                ScalarValue::Date32(Some(value)) => {
+                    let datetime =
+                        datafusion::arrow::temporal_conversions::date32_to_datetime(*value);
+                    let date = datetime.format("%Y-%m-%d").to_string();
+                    OutExpr::Value(Value::SingleQuotedString(date))
+                }
                 ScalarValue::Date64(_) => todo!(),
                 ScalarValue::TimestampSecond(_, _) => todo!(),
                 ScalarValue::TimestampMillisecond(_, _) => todo!(),
@@ -680,11 +778,12 @@ fn expr_to_ast(expr: &Expr, dialect: DatabaseDialect) -> sqlparser::ast::Expr {
                 Operator::BitwiseOr => BinaryOperator::BitwiseOr,
                 Operator::StringConcat => BinaryOperator::StringConcat,
             };
-            OutExpr::BinaryOp {
+            // This creates unnecessary nesting, but should have no perf impact
+            OutExpr::Nested(Box::new(OutExpr::BinaryOp {
                 left: Box::new(expr_to_ast(left, dialect)),
                 op,
                 right: Box::new(expr_to_ast(right, dialect)),
-            }
+            }))
         }
         Expr::Not(expr) => OutExpr::UnaryOp {
             op: UnaryOperator::Not,
@@ -910,7 +1009,10 @@ fn expr_to_ast(expr: &Expr, dialect: DatabaseDialect) -> sqlparser::ast::Expr {
         Expr::Wildcard => todo!(),
         Expr::QualifiedWildcard { .. } => todo!(),
         Expr::Exists { subquery, negated } => {
-            let (subquery, _) = logical_plan_to_ast(&subquery.subquery, dialect).unwrap();
+            let mut renamed_columns = Default::default();
+            let LogicalPlanAst {
+                query: subquery, ..
+            } = logical_plan_to_ast(&subquery.subquery, &mut renamed_columns, dialect).unwrap();
             let exists = OutExpr::Exists(Box::new(subquery));
             if *negated {
                 OutExpr::UnaryOp {
@@ -926,7 +1028,10 @@ fn expr_to_ast(expr: &Expr, dialect: DatabaseDialect) -> sqlparser::ast::Expr {
             subquery,
             negated,
         } => {
-            let (subquery, _) = logical_plan_to_ast(&subquery.subquery, dialect).unwrap();
+            let mut renamed_columns = Default::default();
+            let LogicalPlanAst {
+                query: subquery, ..
+            } = logical_plan_to_ast(&subquery.subquery, &mut renamed_columns, dialect).unwrap();
             OutExpr::InSubquery {
                 expr: Box::new(expr_to_ast(expr, dialect)),
                 subquery: Box::new(subquery),
@@ -934,7 +1039,10 @@ fn expr_to_ast(expr: &Expr, dialect: DatabaseDialect) -> sqlparser::ast::Expr {
             }
         }
         Expr::ScalarSubquery(subquery) => {
-            let (subquery, _) = logical_plan_to_ast(&subquery.subquery, dialect).unwrap();
+            let mut renamed_columns = Default::default();
+            let LogicalPlanAst {
+                query: subquery, ..
+            } = logical_plan_to_ast(&subquery.subquery, &mut renamed_columns, dialect).unwrap();
             OutExpr::Subquery(Box::new(subquery))
         }
         Expr::GroupingSet(_) => todo!(),
@@ -1094,51 +1202,6 @@ pub fn expr_to_sql(expr: &Expr, _dialect: DatabaseDialect) -> String {
     }
 }
 
-fn expr_inner_name(expr: &Expr) -> String {
-    match expr {
-        Expr::Alias(expr, _) => expr_inner_name(expr),
-        Expr::Column(column) => column.name.clone(),
-        Expr::ScalarVariable(_, _) => todo!(),
-        Expr::Literal(lit) => lit.to_string(), // TODO
-        Expr::BinaryExpr { left, op, right } => {
-            dbg!(left);
-            dbg!(op);
-            dbg!(right);
-
-            panic!();
-        }
-        Expr::Not(_) => todo!(),
-        Expr::IsNotNull(_) => todo!(),
-        Expr::IsNull(_) => todo!(),
-        Expr::Negative(_) => todo!(),
-        Expr::GetIndexedField { .. } => todo!(),
-        Expr::Between { .. } => todo!(),
-        Expr::Case { .. } => todo!(),
-        Expr::Cast { .. } => todo!(),
-        Expr::TryCast { .. } => todo!(),
-        Expr::Sort { .. } => todo!(),
-        Expr::ScalarFunction { .. } => todo!(),
-        Expr::ScalarUDF { .. } => todo!(),
-        Expr::AggregateFunction {
-            fun,
-            args,
-            distinct,
-        } => {
-            dbg!(fun, args, distinct);
-            panic!()
-        }
-        Expr::WindowFunction { .. } => todo!(),
-        Expr::AggregateUDF { .. } => todo!(),
-        Expr::InList { .. } => todo!(),
-        Expr::Wildcard => todo!(),
-        Expr::QualifiedWildcard { .. } => todo!(),
-        Expr::Exists { .. } => todo!(),
-        Expr::InSubquery { .. } => todo!(),
-        Expr::ScalarSubquery(_) => todo!(),
-        Expr::GroupingSet(_) => todo!(),
-    }
-}
-
 fn datatype_to_ast(data_type: &DataType, _dialect: DatabaseDialect) -> sqlparser::ast::DataType {
     use sqlparser::ast::DataType as DT;
     match data_type {
@@ -1204,6 +1267,12 @@ fn extract_datetime(expr: &Expr) -> sqlparser::ast::DateTimeField {
         t => panic!("Cant extract date from {:?}", t),
     }
 }
+
+#[inline]
+fn generate_column_name(col_length: usize) -> String {
+    format!("renamedcol{:?}", col_length + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1257,10 +1326,17 @@ mod tests {
 
     #[test]
     fn test_ast() {
-        let query = "select * from a where b in (1,2,3)";
+        let query = "
+        select 
+            e,
+            sum(a) as b,
+            sum(a + (1 * c)) as d
+        from tbl
+        group by e";
         let dialect = sqlparser::dialect::PostgreSqlDialect {};
         let out = sqlparser::parser::Parser::parse_sql(&dialect, query).unwrap();
         println!("AST: {:#?}", out);
+        println!("Query: {:#?}", out[0].to_string());
     }
 
     #[test]

@@ -275,11 +275,13 @@ impl PhysicalPlanner for SqlPhysicalQueryPlanner {
 fn fix_query(query: &str) -> String {
     // TODO: compile these once, but this is a fallback to not stall development.
     // A more correct solution is to support writing SQL strings from sqlparser-rs.
+    let re_uint8 = regex::Regex::new(r"UInt8\((?P<value>\d+)\)").unwrap();
     let re_int64 = regex::Regex::new(r"Int64\((?P<value>\d+)\)").unwrap();
     let re_uint64 = regex::Regex::new(r"Uint64\((?P<value>\d+)\)").unwrap();
     let re_float64 = regex::Regex::new(r"Float64\((?P<value>[\d.]+)\)").unwrap();
     let re_l_lit = regex::Regex::new(r"(?P<value>\d+)L").unwrap();
-    let query = re_int64.replace_all(query, "$value");
+    let query = re_uint8.replace_all(query, "$value");
+    let query = re_int64.replace_all(&query, "$value");
     let query = re_uint64.replace_all(&query, "$value");
     let query = re_float64.replace_all(&query, "$value");
     let query = re_l_lit.replace_all(&query, "$value");
