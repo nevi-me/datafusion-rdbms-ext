@@ -159,7 +159,7 @@ impl TryFrom<PgDataType> for Field {
             // "name" => Err(()),
             // This is a default that I have set, we can change to something saner
             // Ideally we should get the default precision from the DB if it is set
-            "numeric" => Ok(DataType::Decimal(38, 10)),
+            "numeric" => Ok(DataType::Decimal(38, 4)),
             // "oid" => Err(()),
             "real" => Ok(DataType::Float32),
             "smallint" => Ok(DataType::Int16),
