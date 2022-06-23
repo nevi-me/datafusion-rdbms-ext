@@ -51,31 +51,100 @@ pub fn logical_plan_to_ast(
     // );
     Ok(match plan {
         LogicalPlan::Projection(outer_project) => {
-            if let LogicalPlan::Aggregate(agg) = &*outer_project.input {
-                if let LogicalPlan::Projection(inner_project) = &*agg.input {
+            if let LogicalPlan::Aggregate(aggregate) = &*outer_project.input {
+                if let LogicalPlan::Projection(inner_project) = &*aggregate.input {
                     if let LogicalPlan::TableScan(scan) = &*inner_project.input {
-                        let inner_agg_expr = agg
-                            .aggr_expr
-                            .iter()
-                            .map(|e| match e {
-                                InExpr::Alias(ex, alias) => {
-                                    let key = alias.replace('#', "");
-                                    (key, ex.clone())
-                                }
-                                _ => {
-                                    let key = e.to_string().replace('#', "");
-                                    (key, Box::new(e.clone()))
-                                }
-                            })
-                            .collect::<HashMap<_, _>>();
+                        // The outer projection should only be renaming columns in q1
 
-                        let mut outer_agg_expr = HashMap::new();
-                        for expr in &outer_project.expr {
-                            if let InExpr::Alias(e, alias) = expr {
-                                let key = e.to_string().replace('#', "");
-                                outer_agg_expr.insert(key, (alias.to_owned(), e.clone()));
+                        // The inner projection computes some intermediate columns, rename its output
+                        // Any inner projection expression that is not a Column needs to be preserved
+                        let mut inner_project_expr = HashMap::new();
+                        for expr in &inner_project.expr {
+                            // If the expression is an alias, then rename the alias
+                            if let InExpr::Alias(aliased_expr, alias) = expr {
+                                let aliased_name =
+                                    aliased_expr.name(&inner_project.schema).expect("No name");
+                                let col_name = generate_column_name(renamed_columns.len());
+                                inner_project_expr.insert(alias.clone(), *aliased_expr.clone());
+                                let alias_expr = expr.clone().alias(&col_name);
+                                inner_project_expr.insert(aliased_name, alias_expr.clone());
+                                renamed_columns
+                                    .insert(col_name, expr.name(&inner_project.schema).unwrap());
                             }
                         }
+                        let aggregates = aggregate.aggr_expr.iter().map(|expr| {
+                            let name = expr.name(&aggregate.schema).unwrap();
+                            let agg_expr = if let InExpr::AggregateFunction { fun, args, distinct } = expr {
+                                if args.len() != 1 {
+                                    todo!("Aggregate functions with != expression not yet supported")
+                                }
+                                let arg1 = &args[0];
+                                match arg1 {
+                                    InExpr::Alias(_, alias) => {
+                                        // Get the original expression
+                                        let inner_expr = inner_project_expr.get(alias).expect("Expr1 not found");
+                                        // Rewrite the aggregate to be over the expression, not a column
+                                        InExpr::AggregateFunction { fun: fun.clone(), args: vec![inner_expr.clone()], distinct: *distinct }
+                                    },
+                                    InExpr::Column(_) | InExpr::Literal(_) => {
+                                        expr.clone()
+                                    },
+                                    InExpr::BinaryExpr { left, op, right } => {
+                                        // Left or Right is an alias (or both)
+                                        let left: InExpr = match &**left {
+                                            InExpr::Alias(aliased_expr, _) => {
+                                                if let InExpr::Column(_) = &**aliased_expr {
+                                                    // Find the column on the inner projection
+                                                    let col_name = aliased_expr.name(&inner_project.schema).expect("Expr not found");
+                                                    let found = inner_project_expr.get(&col_name).expect("Col not found");
+                                                    found.clone()
+                                                } else {
+                                                    *aliased_expr.clone()
+
+                                                }
+                                            }
+                                            _ => *left.clone(),
+                                        };
+                                        let right = if let InExpr::Alias(aliased_expr, _) = &**right {
+                                            aliased_expr.clone()
+                                        } else {
+                                            right.clone()
+                                        };
+                                        // Check left and right, are any of them column names?
+                                        let expr = InExpr::BinaryExpr { left: Box::new(left), op: *op, right };
+                                        // Get the original expression
+                                        InExpr::AggregateFunction { fun: fun.clone(), args: vec![expr], distinct: *distinct }
+                                    }
+                                    e => todo!("{e}")
+                                }
+                            } else {
+                                expr.clone()
+                            };
+
+                            (name, agg_expr)
+                        }).collect::<HashMap<_, _>>();
+                        let projection = outer_project
+                            .expr
+                            .iter()
+                            .map(|expr| {
+                                match expr {
+                                    InExpr::Alias(alias_expr, alias) => {
+                                        // The alias is in the form #agg(expr) as alias,
+                                        // but the agg(expr) is a name
+                                        let aliased_expr_name =
+                                            alias_expr.name(&aggregate.schema).unwrap();
+                                        let agg_expr =
+                                            &(*aggregates.get(&aliased_expr_name).unwrap()).clone();
+                                        expr_to_select_item(&agg_expr.clone().alias(alias), dialect)
+                                    }
+                                    InExpr::Column(_) => {
+                                        // dbg!(col_name);
+                                        expr_to_select_item(expr, dialect)
+                                    }
+                                    _ => todo!("Unsupported projection of aggregate {expr}"),
+                                }
+                            })
+                            .collect();
 
                         // Extract connection
                         let TableScan { ref source, .. } = scan;
@@ -114,29 +183,7 @@ pub fn logical_plan_to_ast(
                             body: SetExpr::Select(Box::new(Select {
                                 distinct: false,
                                 top: None,
-                                projection: outer_project
-                                    .expr
-                                    .iter()
-                                    .map(|e| {
-                                        // If expr is alias, use its aliased expr
-                                        match e {
-                                            InExpr::Alias(ex, alias) => {
-                                                let key = ex.to_string().replace('#', "");
-                                                match inner_agg_expr.get(&key) {
-                                                    Some(aliased) => expr_to_select_item(
-                                                        &InExpr::Alias(
-                                                            aliased.clone(),
-                                                            alias.to_owned(),
-                                                        ),
-                                                        dialect,
-                                                    ),
-                                                    None => expr_to_select_item(ex, dialect),
-                                                }
-                                            }
-                                            _ => expr_to_select_item(e, dialect),
-                                        }
-                                    })
-                                    .collect(),
+                                projection,
                                 from: vec![TableWithJoins {
                                     relation: TableFactor::Table {
                                         name: ObjectName(
@@ -157,7 +204,7 @@ pub fn logical_plan_to_ast(
                                 into: None,
                                 lateral_views: vec![],
                                 selection,
-                                group_by: agg
+                                group_by: aggregate
                                     .group_expr
                                     .iter()
                                     .map(|expr| expr_to_ast(expr, dialect))
@@ -199,6 +246,15 @@ pub fn logical_plan_to_ast(
                     query: join,
                     connector,
                 });
+            } else if let LogicalPlan::Projection(_) = &*outer_project.input {
+                panic!("Plan: {:#?}", plan);
+            } else if let LogicalPlan::Filter(_) = &*outer_project.input {
+                // Projection + Filter + * means some filters weren't pushed through.
+                // The projection likely computes columns, thus it is not performant to
+                // compute remotely because of the extra data to be transferred.
+                // This rule is thus unsupported, as it expresses that more of the query
+                // should not be passed to source.
+                unsupported_plan!(plan)
             }
             let mut inner_query =
                 logical_plan_to_ast(&outer_project.input, renamed_columns, dialect)?;
@@ -212,29 +268,44 @@ pub fn logical_plan_to_ast(
                     outer_project.expr.iter().for_each(|e| {
                         match e {
                             InExpr::Alias(_, name) => {
-                                // Find exprwithalias from select.projection
-                                select.projection.iter().for_each(|ee| {
+                                // Find ExprWithAlias from select.projection
+                                // dbg!((expr, name));
+                                let expr_added = select.projection.iter().any(|ee| {
                                     match ee {
-                                        SelectItem::UnnamedExpr(_) => todo!("We should not allow unnamed expressions, but alias them internally"),
+                                        SelectItem::UnnamedExpr(_) => false,
                                         SelectItem::ExprWithAlias { expr, alias } => {
                                             // Look up the alias name, remove it
-                                            let generated_alias = renamed_columns.remove(&alias.value);
+                                            let generated_alias =
+                                                renamed_columns.remove(&alias.value);
                                             match generated_alias {
                                                 Some(_) => {
                                                     // Alias was found, replace it
-                                                    outer_projection.push(SelectItem::ExprWithAlias { expr: expr.clone(), alias: Ident { value: name.clone(), quote_style: None } })
-                                                },
+                                                    outer_projection.push(
+                                                        SelectItem::ExprWithAlias {
+                                                            expr: expr.clone(),
+                                                            alias: Ident {
+                                                                value: name.clone(),
+                                                                quote_style: None,
+                                                            },
+                                                        },
+                                                    )
+                                                }
                                                 None => {
                                                     // alias was not found, fall back
-                                                    outer_projection.push(expr_to_select_item(e, dialect));
-                                                },
+                                                    outer_projection
+                                                        .push(expr_to_select_item(e, dialect));
+                                                }
                                             }
-                                        },
-                                        SelectItem::QualifiedWildcard(_) => outer_projection.push(expr_to_select_item(e, dialect)),
-                                        SelectItem::Wildcard => outer_projection.push(expr_to_select_item(e, dialect)),
+                                            true
+                                        }
+                                        SelectItem::QualifiedWildcard(_) => false,
+                                        SelectItem::Wildcard => false,
                                     }
                                 });
-                            },
+                                if !expr_added {
+                                    outer_projection.push(expr_to_select_item(e, dialect))
+                                }
+                            }
                             _ => outer_projection.push(expr_to_select_item(e, dialect)),
                         }
                     });
@@ -246,7 +317,23 @@ pub fn logical_plan_to_ast(
                     // So the query here could have some redundant projections.
                     // Some of the projection values might be new columns generated through
                     // calculations, so how would I know?
-                    panic!("Query: {:#?}", query.to_string())
+                    match &query.body {
+                        SetExpr::Select(select) => {
+                            let projection = outer_project
+                                .expr
+                                .iter()
+                                .map(|expr| expr_to_select_item(expr, dialect))
+                                .collect();
+                            let mut selection = *select.clone();
+                            selection.projection = projection;
+                            query.body = SetExpr::Select(Box::new(selection));
+                        }
+                        SetExpr::Query(query) => todo!("{:#?}", query),
+                        SetExpr::SetOperation { .. } => todo!(),
+                        SetExpr::Values(_) => todo!(),
+                        SetExpr::Insert(_) => todo!(),
+                    }
+                    // panic!("Query: {:#?}", query.to_string())
                 }
                 SetExpr::SetOperation { .. } => todo!(),
                 SetExpr::Values(_) => todo!(),
@@ -270,6 +357,12 @@ pub fn logical_plan_to_ast(
             // A filter can loosely be expressed as "select * from input where {predicate}"
             // While this nests a table select, we ordinarily expect to generate SQL code
             // from an already optimised LogicalPlan, so this should not be a common occurrence
+            //
+            // If a filter is preceded by a TableScan, it means that the planner does not
+            // wish to push down the filter even if it supported. We honour that.
+            if let LogicalPlan::TableScan(_) = &*filter.input {
+                unsupported_plan!(plan)
+            }
             let LogicalPlanAst {
                 mut query,
                 connector,
@@ -315,7 +408,7 @@ pub fn logical_plan_to_ast(
                     select.projection = projection;
                 }
                 SetExpr::Query(query) => {
-                    println!("Query: {:#?}", query);
+                    // println!("Query: {:#?}", query);
                     println!("Query string: {query}");
                     return Err(RdbmsError::UnsupportedQuery(
                         "Aggregates are not fully supported".to_string(),
@@ -505,7 +598,7 @@ pub fn logical_plan_to_ast(
                     .fields()
                     .iter()
                     .map(|field| {
-                        // TODO handle aliases
+                        // Safe to use unnamed expression here?
                         SelectItem::UnnamedExpr(Expr::Identifier(Ident {
                             value: field.name().clone(),
                             quote_style: None,
@@ -677,10 +770,15 @@ fn expr_to_ast(expr: &Expr, dialect: DatabaseDialect) -> sqlparser::ast::Expr {
             // We ignore that for now
             expr_to_ast(expr, dialect)
         }
-        Expr::Column(col) => OutExpr::Identifier(Ident {
-            value: col.name.clone(),
-            quote_style: None,
-        }),
+        Expr::Column(col) => {
+            // if col.name.contains("BinaryExpr") {
+            //     panic!("{} not allowed", col.name);
+            // }
+            OutExpr::Identifier(Ident {
+                value: col.name.clone(),
+                quote_style: None,
+            })
+        }
         Expr::ScalarVariable(_, _) => todo!(),
         // Date32 gets written as the i32 number, which won't work on SQL DBs
         Expr::Literal(lit) => {
@@ -779,11 +877,58 @@ fn expr_to_ast(expr: &Expr, dialect: DatabaseDialect) -> sqlparser::ast::Expr {
                 Operator::StringConcat => BinaryOperator::StringConcat,
             };
             // This creates unnecessary nesting, but should have no perf impact
-            OutExpr::Nested(Box::new(OutExpr::BinaryOp {
-                left: Box::new(expr_to_ast(left, dialect)),
-                op,
-                right: Box::new(expr_to_ast(right, dialect)),
-            }))
+            match (&**left, &**right) {
+                // (a * (b - 1)) or ((a + 1))
+                (Expr::Column(_), Expr::BinaryExpr { .. })
+                | (Expr::Alias(_, _), Expr::BinaryExpr { .. })
+                | (Expr::BinaryExpr { .. }, Expr::Column(_)) => {
+                    OutExpr::Nested(Box::new(OutExpr::BinaryOp {
+                        left: Box::new(expr_to_ast(left, dialect)),
+                        op,
+                        right: Box::new(expr_to_ast(right, dialect)),
+                    }))
+                }
+                (Expr::BinaryExpr { .. }, Expr::BinaryExpr { .. }) => {
+                    OutExpr::Nested(Box::new(OutExpr::BinaryOp {
+                        left: Box::new(expr_to_ast(left, dialect)),
+                        op,
+                        right: Box::new(expr_to_ast(right, dialect)),
+                    }))
+                }
+                (Expr::Column(_), Expr::Literal(_)) => OutExpr::BinaryOp {
+                    left: Box::new(expr_to_ast(left, dialect)),
+                    op,
+                    right: Box::new(expr_to_ast(right, dialect)),
+                },
+                (Expr::Literal(_), Expr::Column(_)) => {
+                    dbg!((
+                        left.variant_name(),
+                        right.variant_name(),
+                        &left,
+                        &op,
+                        &right
+                    ));
+                    OutExpr::Nested(Box::new(OutExpr::BinaryOp {
+                        left: Box::new(expr_to_ast(left, dialect)),
+                        op,
+                        right: Box::new(expr_to_ast(right, dialect)),
+                    }))
+                }
+                _ => {
+                    dbg!((
+                        left.variant_name(),
+                        right.variant_name(),
+                        &left,
+                        &op,
+                        &right
+                    ));
+                    OutExpr::BinaryOp {
+                        left: Box::new(expr_to_ast(left, dialect)),
+                        op,
+                        right: Box::new(expr_to_ast(right, dialect)),
+                    }
+                }
+            }
         }
         Expr::Not(expr) => OutExpr::UnaryOp {
             op: UnaryOperator::Not,
@@ -1169,7 +1314,81 @@ pub fn expr_to_sql(expr: &Expr, _dialect: DatabaseDialect) -> String {
                 if *nulls_first { " NULLS FIRST" } else { "" }
             )
         }
-        Expr::ScalarFunction { fun, args } => todo!("Fun: {:?}, args: {:?}", fun, args),
+        Expr::ScalarFunction { fun, args } => match fun {
+            BuiltinScalarFunction::Abs => todo!(),
+            BuiltinScalarFunction::Acos => todo!(),
+            BuiltinScalarFunction::Asin => todo!(),
+            BuiltinScalarFunction::Atan => todo!(),
+            BuiltinScalarFunction::Ceil => todo!(),
+            BuiltinScalarFunction::Coalesce => todo!(),
+            BuiltinScalarFunction::Cos => todo!(),
+            BuiltinScalarFunction::Digest => todo!(),
+            BuiltinScalarFunction::Exp => todo!(),
+            BuiltinScalarFunction::Floor => todo!(),
+            BuiltinScalarFunction::Ln => todo!(),
+            BuiltinScalarFunction::Log => todo!(),
+            BuiltinScalarFunction::Log10 => todo!(),
+            BuiltinScalarFunction::Log2 => todo!(),
+            BuiltinScalarFunction::Power => todo!(),
+            BuiltinScalarFunction::Round => todo!(),
+            BuiltinScalarFunction::Signum => todo!(),
+            BuiltinScalarFunction::Sin => todo!(),
+            BuiltinScalarFunction::Sqrt => todo!(),
+            BuiltinScalarFunction::Tan => todo!(),
+            BuiltinScalarFunction::Trunc => todo!(),
+            BuiltinScalarFunction::Array => todo!(),
+            BuiltinScalarFunction::Ascii => todo!(),
+            BuiltinScalarFunction::BitLength => todo!(),
+            BuiltinScalarFunction::Btrim => todo!(),
+            BuiltinScalarFunction::CharacterLength => todo!(),
+            BuiltinScalarFunction::Chr => todo!(),
+            BuiltinScalarFunction::Concat => todo!(),
+            BuiltinScalarFunction::ConcatWithSeparator => todo!(),
+            BuiltinScalarFunction::DatePart => todo!(),
+            BuiltinScalarFunction::DateTrunc => todo!(),
+            BuiltinScalarFunction::InitCap => todo!(),
+            BuiltinScalarFunction::Left => todo!(),
+            BuiltinScalarFunction::Lpad => todo!(),
+            BuiltinScalarFunction::Lower => todo!(),
+            BuiltinScalarFunction::Ltrim => todo!(),
+            BuiltinScalarFunction::MD5 => todo!(),
+            BuiltinScalarFunction::NullIf => todo!(),
+            BuiltinScalarFunction::OctetLength => todo!(),
+            BuiltinScalarFunction::Random => todo!(),
+            BuiltinScalarFunction::RegexpReplace => todo!(),
+            BuiltinScalarFunction::Repeat => todo!(),
+            BuiltinScalarFunction::Replace => todo!(),
+            BuiltinScalarFunction::Reverse => todo!(),
+            BuiltinScalarFunction::Right => todo!(),
+            BuiltinScalarFunction::Rpad => todo!(),
+            BuiltinScalarFunction::Rtrim => todo!(),
+            BuiltinScalarFunction::SHA224 => todo!(),
+            BuiltinScalarFunction::SHA256 => todo!(),
+            BuiltinScalarFunction::SHA384 => todo!(),
+            BuiltinScalarFunction::SHA512 => todo!(),
+            BuiltinScalarFunction::SplitPart => todo!(),
+            BuiltinScalarFunction::StartsWith => todo!(),
+            BuiltinScalarFunction::Strpos => todo!(),
+            BuiltinScalarFunction::Substr => {
+                format!(
+                    "substring({} from {} for {})",
+                    expr_to_sql(&args[0], _dialect),
+                    expr_to_sql(&args[1], _dialect),
+                    expr_to_sql(&args[2], _dialect)
+                )
+            }
+            BuiltinScalarFunction::ToHex => todo!(),
+            BuiltinScalarFunction::ToTimestamp => todo!(),
+            BuiltinScalarFunction::ToTimestampMillis => todo!(),
+            BuiltinScalarFunction::ToTimestampMicros => todo!(),
+            BuiltinScalarFunction::ToTimestampSeconds => todo!(),
+            BuiltinScalarFunction::Now => todo!(),
+            BuiltinScalarFunction::Translate => todo!(),
+            BuiltinScalarFunction::Trim => todo!(),
+            BuiltinScalarFunction::Upper => todo!(),
+            BuiltinScalarFunction::RegexpMatch => todo!(),
+            BuiltinScalarFunction::Struct => todo!(),
+        },
         Expr::ScalarUDF { .. } => todo!(),
         Expr::AggregateFunction { .. } => todo!(),
         Expr::WindowFunction { .. } => todo!(),
@@ -1272,7 +1491,6 @@ fn extract_datetime(expr: &Expr) -> sqlparser::ast::DateTimeField {
 fn generate_column_name(col_length: usize) -> String {
     format!("renamedcol{:?}", col_length + 1)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -56,7 +56,7 @@ Here is a list of the queries, that shows which tests pass, or what is missing.
   - [ ] Accurate result
     - Float64 rounding issue when passing down query (check other data sources)
 - [ ] Q7
-  - We should not use `SelectItem::UnnamedExpr`
+  - Ambiguous column name `n_nationkey`
 - [ ] Q8
   - Ambiguous column name `n_nationkey`
 - [ ] Q9
@@ -67,10 +67,11 @@ Here is a list of the queries, that shows which tests pass, or what is missing.
 - [ ] Q11
   - Physical plan does not support logical expression subquery
 - [ ] Q12
-  - String literal interpreted as column name
+  - String literal interpreted as column name (columns not being projected correctly) (case when)
 - [ ] Q13
+  - Nested projections due to aliasing
 - [ ] Q14
-  - String literal interpreted as column name
+  - String literal interpreted as column name (columns not being projected correctly) (case when)
 - [ ] Q15
   - DataFusion context only supports a single statement
 - [x] Q16
@@ -80,6 +81,7 @@ Here is a list of the queries, that shows which tests pass, or what is missing.
 - [ ] Q18
   - `group by x having y` is not parsed correctly
   - complete column rename work
+  - aggregate functions not allowed in WHERE clause
 - [ ] Q19
   - DF creates a cross join, not yet supported in parser
   - `ScalarSubquery` not supported in `expr_to_sql`

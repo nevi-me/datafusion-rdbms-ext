@@ -26,11 +26,11 @@ impl SqlAstPlanNode {
         let LogicalPlanAst { query, connector } =
             logical_plan_to_ast(plan, &mut renamed_columns, DatabaseDialect::Generic)
                 .map_err(DataFusionError::from)?;
-        assert!(
-            renamed_columns.is_empty(),
-            "Renamed columns: {:#?}",
-            renamed_columns
-        );
+        // assert!(
+        //     renamed_columns.is_empty(),
+        //     "Renamed columns: {:#?}",
+        //     renamed_columns
+        // );
         Ok(Self {
             input: plan.clone(),
             schema: plan.schema().clone(),
@@ -74,7 +74,7 @@ impl UserDefinedLogicalNode for SqlAstPlanNode {
         let LogicalPlanAst { query, connector } =
             logical_plan_to_ast(&inputs[0], &mut renamed_columns, DatabaseDialect::Generic)
                 .unwrap();
-        assert!(renamed_columns.is_empty());
+        // assert!(renamed_columns.is_empty());
         Arc::new(SqlAstPlanNode {
             ast: query,
             input: inputs[0].clone(),

@@ -31,7 +31,7 @@ async fn run_query(ctx: &mut SessionContext, query: &str) {
     let optimized_plan = ctx.optimize(&plan).unwrap();
 
     println!("Logical plan:\n\n {:?}", plan);
-    println!("Optimized plan:\n\n {:?}", optimized_plan);
+    println!("Optimized plan:\n\n {:?}\n", optimized_plan);
 
     let batches = df.collect().await.unwrap();
 
