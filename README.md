@@ -66,16 +66,18 @@ Here is a list of the queries, that shows which tests pass, or what is missing.
   - [x] Accurate result
 - [ ] Q11
   - Physical plan does not support logical expression subquery
-- [ ] Q12
-  - String literal interpreted as column name (columns not being projected correctly) (case when)
+- [x] Q12
 - [ ] Q13
+  - [x] Passes
+  - [ ] Accurate result
   - Nested projections due to aliasing
 - [ ] Q14
   - String literal interpreted as column name (columns not being projected correctly) (case when)
 - [ ] Q15
   - DataFusion context only supports a single statement
-- [x] Q16
+- [ ] Q16
   - Can be improved by supporting anti-join pushdown
+  - Joining panics if there are differing column types
 - [ ] Q17
   - `ScalarSubquery` not supported in `expr_to_sql`
 - [ ] Q18

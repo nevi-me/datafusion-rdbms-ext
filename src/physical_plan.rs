@@ -177,8 +177,9 @@ impl QueryPlanner for SqlDatabaseQueryPlanner {
     }
 }
 
+#[async_trait::async_trait]
 impl ExtensionPlanner for SqlDatabaseQueryPlanner {
-    fn plan_extension(
+    async fn plan_extension(
         &self,
         _planner: &dyn PhysicalPlanner,
         node: &dyn UserDefinedLogicalNode,
@@ -192,6 +193,8 @@ impl ExtensionPlanner for SqlDatabaseQueryPlanner {
                 let query = node.ast.to_string();
                 let query = fix_query(&query);
                 println!("\n\n{query}\n\n");
+
+                // dbg!(&node.ast);
 
                 let schema = Schema::new_with_metadata(
                     node.schema()

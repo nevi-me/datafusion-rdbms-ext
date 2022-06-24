@@ -12,8 +12,11 @@ use sqlparser::ast::{Ident, ObjectName, SelectItem};
 
 use crate::error::RdbmsError;
 use crate::node::SqlAstPlanNode;
+use crate::parser::aggregates::collect_aggregates;
 use crate::sqldb::postgres::table_provider::PostgresTableProvider;
 use crate::sqldb::DatabaseConnector;
+
+mod aggregates;
 
 pub struct LogicalPlanAst {
     /// The AST query generated from the logical plan
@@ -72,57 +75,11 @@ pub fn logical_plan_to_ast(
                                     .insert(col_name, expr.name(&inner_project.schema).unwrap());
                             }
                         }
-                        let aggregates = aggregate.aggr_expr.iter().map(|expr| {
-                            let name = expr.name(&aggregate.schema).unwrap();
-                            let agg_expr = if let InExpr::AggregateFunction { fun, args, distinct } = expr {
-                                if args.len() != 1 {
-                                    todo!("Aggregate functions with != expression not yet supported")
-                                }
-                                let arg1 = &args[0];
-                                match arg1 {
-                                    InExpr::Alias(_, alias) => {
-                                        // Get the original expression
-                                        let inner_expr = inner_project_expr.get(alias).expect("Expr1 not found");
-                                        // Rewrite the aggregate to be over the expression, not a column
-                                        InExpr::AggregateFunction { fun: fun.clone(), args: vec![inner_expr.clone()], distinct: *distinct }
-                                    },
-                                    InExpr::Column(_) | InExpr::Literal(_) => {
-                                        expr.clone()
-                                    },
-                                    InExpr::BinaryExpr { left, op, right } => {
-                                        // Left or Right is an alias (or both)
-                                        let left: InExpr = match &**left {
-                                            InExpr::Alias(aliased_expr, _) => {
-                                                if let InExpr::Column(_) = &**aliased_expr {
-                                                    // Find the column on the inner projection
-                                                    let col_name = aliased_expr.name(&inner_project.schema).expect("Expr not found");
-                                                    let found = inner_project_expr.get(&col_name).expect("Col not found");
-                                                    found.clone()
-                                                } else {
-                                                    *aliased_expr.clone()
-
-                                                }
-                                            }
-                                            _ => *left.clone(),
-                                        };
-                                        let right = if let InExpr::Alias(aliased_expr, _) = &**right {
-                                            aliased_expr.clone()
-                                        } else {
-                                            right.clone()
-                                        };
-                                        // Check left and right, are any of them column names?
-                                        let expr = InExpr::BinaryExpr { left: Box::new(left), op: *op, right };
-                                        // Get the original expression
-                                        InExpr::AggregateFunction { fun: fun.clone(), args: vec![expr], distinct: *distinct }
-                                    }
-                                    e => todo!("{e}")
-                                }
-                            } else {
-                                expr.clone()
-                            };
-
-                            (name, agg_expr)
-                        }).collect::<HashMap<_, _>>();
+                        let aggregates = collect_aggregates(
+                            aggregate,
+                            &inner_project_expr,
+                            Some(&inner_project.schema),
+                        );
                         let projection = outer_project
                             .expr
                             .iter()
@@ -223,6 +180,54 @@ pub fn logical_plan_to_ast(
                         };
                         return Ok(LogicalPlanAst { query, connector });
                     }
+                } else if let LogicalPlan::Join(_) = &*aggregate.input {
+                    let aggregates = collect_aggregates(aggregate, &Default::default(), None);
+                    let projection = outer_project
+                        .expr
+                        .iter()
+                        .map(|expr| {
+                            match expr {
+                                InExpr::Alias(alias_expr, alias) => {
+                                    // The alias is in the form #agg(expr) as alias,
+                                    // but the agg(expr) is a name
+                                    let aliased_expr_name =
+                                        alias_expr.name(&aggregate.schema).unwrap();
+                                    let agg_expr =
+                                        &(*aggregates.get(&aliased_expr_name).unwrap()).clone();
+                                    dbg!(&agg_expr, agg_expr.variant_name());
+                                    expr_to_select_item(&agg_expr.clone().alias(alias), dialect)
+                                }
+                                InExpr::Column(_) => {
+                                    // dbg!(col_name);
+                                    expr_to_select_item(expr, dialect)
+                                }
+                                _ => todo!("Unsupported projection of aggregate {expr}"),
+                            }
+                        })
+                        .collect();
+
+                    //
+                    // A join with a select
+                    let LogicalPlanAst {
+                        query: mut join,
+                        connector,
+                    } = logical_plan_to_ast(&aggregate.input, renamed_columns, dialect)?;
+                    // Replace the join's projection
+                    match join.body.borrow_mut() {
+                        SetExpr::Select(select) => {
+                            select.projection = projection;
+                            select.group_by = aggregate
+                                .group_expr
+                                .iter()
+                                .map(|expr| expr_to_ast(expr, dialect))
+                                .collect::<Vec<_>>();
+                        }
+                        _ => panic!(),
+                    }
+                    return Ok(LogicalPlanAst {
+                        query: join,
+                        connector,
+                    });
                 }
             } else if let LogicalPlan::Join(_) = &*outer_project.input {
                 // A join with a select
@@ -246,8 +251,6 @@ pub fn logical_plan_to_ast(
                     query: join,
                     connector,
                 });
-            } else if let LogicalPlan::Projection(_) = &*outer_project.input {
-                panic!("Plan: {:#?}", plan);
             } else if let LogicalPlan::Filter(_) = &*outer_project.input {
                 // Projection + Filter + * means some filters weren't pushed through.
                 // The projection likely computes columns, thus it is not performant to
